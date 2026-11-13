@@ -55,6 +55,10 @@ installed `pwsh.exe`, so what you build is what you get. The banner in the conso
 `$PSVersionTable.PSVersion` read straight out of that assembly, and `$PSHome` points at
 `dist`. Check it with `$PSVersionTable` at the prompt.
 
+The goal is the newest stable release on the newest .NET it supports. A brand new minor
+release is deliberately left alone until it has had a few patches - `7.7.0` is skipped for
+now, on the grounds that Microsoft finds bugs faster than anyone else does.
+
 To move to another release, raise `PowerShellVersion` and set `TargetFramework` to the
 framework that release is built for - `net8.0` for 7.4, `net9.0` for 7.5, `net10.0` for
 7.6. `build.ps1` finds the module folder by pattern, so nothing else refers to the
