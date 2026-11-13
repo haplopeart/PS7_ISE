@@ -239,7 +239,11 @@ fn write_file(path: &std::path::Path, text: &str) {
     }
 }
 
-/// Reflects the document list into the tab control.
+/// Keeps the tab strip in step with the open documents: headers are added and renamed,
+/// never rebuilt. A Win32 tab control gives back no header once it has been handed one,
+/// and the page windows native-windows-gui creates beside them keep their own place in
+/// the strip, so a rebuild that only added new ones left the old titles behind. Closing
+/// is the one place that really does delete, and `close_tab` does it itself.
 pub fn sync_tabs() {
     let (titles, current) = read(|s| {
         (
@@ -252,18 +256,44 @@ pub fn sync_tabs() {
     let mut error = None;
     write(|s| {
         s.switching_tab = true;
-        // Win32 keeps the headers of destroyed child windows, so clear them as well.
-        let tabs_hwnd = s.tabs.handle.hwnd().map(|h| h as *mut core::ffi::c_void);
-        s.pages.clear();
-        if let Some(hwnd) = tabs_hwnd {
-            crate::console::delete_tab_items(hwnd);
+        // More pages than documents: only a delete can do that, and close_tab does it
+        // itself. Truncate rather than let the two drift apart.
+        if s.pages.len() > titles.len() {
+            s.pages.truncate(titles.len());
+            s.tab_titles.truncate(titles.len());
         }
-        for title in &titles {
+        // A header that is already there is renamed in place; only genuinely new
+        // documents get a new tab.
+        for index in 0..titles.len().min(s.pages.len()) {
+            let title = &titles[index];
+            let changed = match s.tab_titles.get(index) {
+                Some(old) => old != title,
+                None => true,
+            };
+            if changed {
+                if let Some(page) = s.pages.get(index) {
+                    page.set_text(title);
+                }
+                if index < s.tab_titles.len() {
+                    s.tab_titles[index] = title.clone();
+                } else {
+                    s.tab_titles.push(title.clone());
+                }
+            }
+        }
+        for title in titles.iter().skip(s.pages.len()) {
             let mut page: nwg::Tab = Default::default();
             match nwg::Tab::builder().parent(&s.tabs).text(title).build(&mut page) {
-                Ok(()) => s.pages.push(page),
+                Ok(()) => {
+                    s.pages.push(page);
+                    s.tab_titles.push(title.clone());
+                }
                 Err(e) => error = Some(e.to_string()),
             }
+        }
+        // The control shows a page only when it is told to, and exactly one should show.
+        for (index, page) in s.pages.iter().enumerate() {
+            page.set_visible(index == current);
         }
         if current < s.pages.len() {
             s.tabs.set_selected_tab(current);
@@ -274,6 +304,22 @@ pub fn sync_tabs() {
     if let Some(e) = error {
         set_status(&format!("Could not create a script tab: {}", e));
     }
+}
+
+/// Removes a header from the strip, and with it the page window Win32 owns. The header
+/// cannot come back, which is why this is the only place the strip shrinks.
+fn delete_tab_header(index: usize) {
+    const TCM_DELETEITEM: u32 = 0x1308;
+    let Some(hwnd) = read(|s| {
+        s.tabs
+            .handle
+            .hwnd()
+            .map(|h| h as *mut std::ffi::c_void)
+    })
+    .flatten() else {
+        return;
+    };
+    crate::console::send_message(hwnd, TCM_DELETEITEM, index, 0);
 }
 
 /// Moves to the document on the tab the user clicked.
@@ -298,7 +344,13 @@ pub fn close_tab(index: usize) {
         return;
     }
     let index = index.min(total - 1);
+    delete_tab_header(index);
     write(|s| {
+        if index < s.pages.len() {
+            // Dropping the page destroys its window; the header itself is already gone.
+            s.pages.remove(index);
+            s.tab_titles.remove(index);
+        }
         s.docs.remove(index);
         if s.docs.is_empty() {
             s.docs.push(Doc {

@@ -437,8 +437,9 @@ pub fn on_keydown(vk: u32) -> bool {
             VK_C => { control_c(); return true; }
             VK_V => { paste(); return true; }
             VK_A => {
-                let max = read(|s| s.draft.chars().count()).unwrap_or(0);
-                write(|s| { s.draft_caret = max; });
+                // What pwsh's own console does: jump to the start of the line without
+                // touching the scroll-back, which a real "select all" would.
+                write(|s| { s.draft_caret = 0; });
                 crate::state::sync_console();
                 return true;
             }
@@ -584,8 +585,10 @@ pub const VK_DELETE: u32 = 0x2E;
 ///
 /// Plain characters go through [`on_char`]. `{NAME}` tokens stand for the keys that arrive
 /// as WM_KEYDOWN rather than as a character, so `{UP}`, `{TAB}`, `{CTRL_C}` and friends
-/// behave exactly as if they had been pressed. A brace that does not open a known token is
-/// typed literally, which keeps PowerShell hashtables like `@{a=1}` intact.
+/// behave exactly as if they had been pressed. `{MENU:n}` runs the menu command with id
+/// `n`, which is how a test presses an entry that has no key of its own. A brace that does
+/// not open a known token is typed literally, which keeps PowerShell hashtables like
+/// `@{a=1}` intact.
 pub fn inject(script: &str) {
     let chars: Vec<char> = script.chars().collect();
     let mut i = 0usize;
@@ -608,6 +611,14 @@ pub fn inject(script: &str) {
 /// Types the keystroke a `{NAME}` token stands for. Returns false for unknown names.
 fn inject_key(name: &str) -> bool {
     let vk = match name.to_ascii_uppercase().as_str() {
+        // Presses a menu item by command id - the way a test reaches View, File and
+        // Help entries that have no key of their own.
+        _ if name.to_ascii_uppercase().starts_with("MENU:") => {
+            if let Ok(id) = name[5..].trim().parse::<u32>() {
+                crate::invoke_command(id);
+            }
+            return true;
+        }
         "TAB" => return on_char('\t'),
         "ENTER" => {
             submit_input();

@@ -40,6 +40,9 @@ derives `$PSHome`, and therefore `$PSModulePath`, from the folder containing
 `System.Management.Automation.dll`, so `dist\Modules\` is what makes the bundled cmdlets
 load.
 
+Scripts open from the command line as well - `dist\PS7_ISE.exe demo.ps1` starts with that
+file in the script pane - or from File > Open Script, `Ctrl+O`, inside the app.
+
 ## Which PowerShell you get
 
 The version is pinned by one property in
@@ -72,7 +75,7 @@ framework.
 | `Tab` | completions from `TabExpansion2`; repeated Tab cycles the candidates |
 | `Up` / `Down` | command history |
 | `Ctrl+C` | copy the selection if there is one, otherwise stop the running command / abandon the line |
-| `Ctrl+V`, `Ctrl+A`, `Esc` | paste, select all, clear the current line |
+| `Ctrl+V`, `Ctrl+A`, `Esc` | paste, jump to the start of the line, clear the current line |
 | `PgUp` / `PgDn` | scroll the scroll-back |
 | `F5` / `F8` | run the script pane / run the selected lines |
 | `F1` | PowerShell 7 help |
@@ -109,7 +112,8 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 - `PS7ISE_DEBUG=1` traces engine events to `%TEMP%\ps7ise.log`, and makes the app replay
   whatever is written to `%TEMP%\ps7ise-inject.txt` as keystrokes - the way automated tests
   drive the prompt, since Windows refuses to deliver input posted by another process to a
-  window without the keyboard focus.
+  window without the keyboard focus. `{MENU:n}` in that file runs the menu command with id
+  `n` (see `state::cmd`), which covers the entries that have no key of their own.
 - The engine's own stderr goes to `%TEMP%\ps7ise-engine.log`.
 
 ## Repository layout
@@ -130,7 +134,10 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 
 - Windows x64 only; the UI is Win32 controls, so there is no theming beyond the console's
   own colours.
-- No debugger: the Debug menu and toolbar are placeholders.
+- No script debugger: no breakpoints, no stepping, no variable inspection. The Debug menu
+  holds only the three commands it can really perform - Run Script, Run Selection, Stop Run.
+- Panes split at a fixed ratio and there is no draggable splitter bar; View > Show/Hide
+  switches between one pane and two.
 - The console scroll-back is trimmed once it passes about 400 000 characters, and every
   refresh rewrites the document, which a normal session never notices but a command
   printing hundreds of megabytes will.

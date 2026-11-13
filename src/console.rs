@@ -50,20 +50,10 @@ pub fn colorref(rgb: [u8; 3]) -> usize {
     (rgb[0] as usize) | ((rgb[1] as usize) << 8) | ((rgb[2] as usize) << 16)
 }
 
-/// Removes every header from a tab control. native-windows-gui has no remove_tab, and
-/// Win32 leaves the headers of destroyed child windows behind, so they are dropped here.
-pub fn delete_tab_items(hwnd: *mut c_void) {
-    const TCM_DELETEALLITEMS: u32 = 0x1000 + 9;
-    unsafe {
-        SendMessageW(hwnd, TCM_DELETEALLITEMS, 0, 0);
-    }
-}
-
-/// Edits a control's selection as if the user had used the Edit menu.
-pub fn send_command(hwnd: *mut c_void, which: u32) {
-    unsafe {
-        SendMessageW(hwnd, which, 0, 0);
-    }
+/// Sends a message the caller has to name itself, for the controls native-windows-gui
+/// does not wrap: the tab strip's header messages, and the rich edit's Cut/Copy/Paste.
+pub fn send_message(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> isize {
+    unsafe { SendMessageW(hwnd, msg, wparam, lparam) }
 }
 
 pub const WM_CUT: u32 = 0x0300;

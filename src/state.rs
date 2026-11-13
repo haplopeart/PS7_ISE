@@ -79,6 +79,11 @@ pub struct AppState {
     pub window: nwg::Window,
     pub tabs: nwg::TabsContainer,
     pub pages: Vec<nwg::Tab>,
+
+    /// The text each tab header shows, kept in step with `pages`. A tab control has no
+    /// way to drop a header it has been given, so the strip is updated in place - new tab,
+    /// renamed tab - rather than rebuilt, and this is what makes a rename detectable.
+    pub tab_titles: Vec<String>,
     pub editor: nwg::RichTextBox,
     pub console: nwg::RichTextBox,
     pub status: nwg::StatusBar,

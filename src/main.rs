@@ -50,10 +50,40 @@ fn main() {
 
     docs::sync_tabs();
     docs::load_editor_from_doc();
+    open_command_line_scripts();
     layout();
     state::focus_console();
 
     nwg::dispatch_thread_events();
+}
+
+/// Opens the script files named on the command line, so `PS7_ISE.exe demo.ps1`, a
+/// shortcut, or "Open with" behave the way they do with the original ISE. Anything that
+/// is not an existing file is ignored: a stray argument must not stop the window opening.
+fn open_command_line_scripts() {
+    let paths: Vec<PathBuf> = std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect();
+    if paths.is_empty() {
+        return;
+    }
+    for path in &paths {
+        docs::open_path(path);
+    }
+    // The startup tab is an empty "Untitled 1"; with real files open it is clutter, and
+    // Ctrl+N still makes one on demand.
+    let untitled = state::read(|s| {
+        s.docs
+            .first()
+            .map(|doc| doc.path.is_none() && doc.text.is_empty())
+            .unwrap_or(false)
+    })
+    .unwrap_or(false);
+    if untitled {
+        docs::close_tab(0);
+    }
 }
 
 // ------------------------------------------------------------------ user interface
@@ -159,6 +189,7 @@ fn build_ui() -> *mut AppState {
         window,
         tabs,
         pages: Vec::new(),
+        tab_titles: Vec::new(),
         editor,
         console,
         status,
@@ -324,7 +355,6 @@ fn layout() {
         } else {
             0
         };
-        let _console_h = (usable - script_h).max(0);
 
         s.editor.set_visible(s.show_script);
         s.tabs.set_visible(s.show_script);
@@ -370,7 +400,9 @@ fn bind_handlers() {
                     _ => None,
                 },
                 console::WM_KEYDOWN => {
-                    if input::on_keydown(w as u32) {
+                    // Shortcuts first: the console must answer F5 and Ctrl+S too, and it
+                    // is the one place where a keystroke demonstrably arrives.
+                    if shortcut(w as u32, false) || input::on_keydown(w as u32) {
                         Some(0)
                     } else {
                         None
@@ -384,14 +416,15 @@ fn bind_handlers() {
         std::mem::forget(handler);
     }
 
-    // F5, F8, F1 and the Ctrl shortcuts are pressed while editing, so the script pane
-    // needs the same hook. Unlike the console it keeps every key it is not asked for.
+    // The same shortcuts are wanted while editing, so the script pane gets its own hook.
+    // Unlike the console it passes on every key it is not asked for, and it leaves
+    // Ctrl+C alone so the control can copy the selection.
     let Some(editor) = state::read(|s| s.editor.handle) else {
         return;
     };
     if let Ok(handler) =
         nwg::bind_raw_event_handler(&editor, EDITOR_SUBCLASS_ID, move |_hwnd, msg, w, _l| {
-            if msg == console::WM_KEYDOWN && on_key_press(w as u32) {
+            if msg == console::WM_KEYDOWN && shortcut(w as u32, true) {
                 return Some(0);
             }
             None
@@ -401,7 +434,9 @@ fn bind_handlers() {
     }
 }
 
-fn dispatch(evt: E, data: nwg::EventData, handle: nwg::ControlHandle) {
+/// Every command and layout message from the window and its children. Keys are handled by
+/// the two subclass hooks, so no key events arrive here.
+fn dispatch(evt: E, _data: nwg::EventData, handle: nwg::ControlHandle) {
     match evt {
         E::OnWindowClose => {
             if state::is(&handle, |s| s.window.handle) {
@@ -430,9 +465,6 @@ fn dispatch(evt: E, data: nwg::EventData, handle: nwg::ControlHandle) {
                 docs::repaint_editor();
             }
         }
-        E::OnKeyPress => {
-            on_key_press(data.on_key());
-        }
         _ => {}
     }
 }
@@ -445,24 +477,39 @@ fn on_tick() {
     state::pump_engine();
 }
 
-/// Keyboard shortcuts. These menus cannot own Win32 accelerators, so the key messages
-/// the controls report are matched here instead. Returns true when the key was acted on,
-/// which lets the caller stop it from reaching the control underneath.
-fn on_key_press(vk: u32) -> bool {
+/// Keyboard shortcuts. These menus cannot own Win32 accelerators, so the key messages the
+/// two panes report are matched here instead, from their subclass hooks - the dispatch
+/// level proved unreliable for the modified combinations. Returns true when the key was
+/// acted on, which stops it reaching the control underneath.
+fn shortcut(vk: u32, from_editor: bool) -> bool {
+    const VK_C: u32 = 0x43;
     const VK_N: u32 = 0x4E;
     const VK_O: u32 = 0x4F;
     const VK_S: u32 = 0x53;
     const VK_W: u32 = 0x57;
 
     let ctrl = console::ctrl_pressed();
-    match (vk, ctrl) {
-        (nwg::keys::F5, false) => docs::run_script(),
-        (nwg::keys::F8, false) => docs::run_selection(),
-        (nwg::keys::F1, false) => show_help(),
-        (VK_S, true) => docs::save_current(console::shift_pressed()),
-        (VK_N, true) => docs::new_document(),
-        (VK_O, true) => docs::open_dialog(),
-        (VK_W, true) => {
+    if !ctrl {
+        match vk {
+            nwg::keys::F5 => docs::run_script(),
+            nwg::keys::F8 => docs::run_selection(),
+            nwg::keys::F1 => show_help(),
+            _ => return false,
+        }
+        return true;
+    }
+
+    // In the script pane Ctrl+C belongs to the control, so that Ctrl+C copies the
+    // selection there. In the console it interrupts, which the console's own handler does.
+    if from_editor && vk == VK_C {
+        return false;
+    }
+
+    match vk {
+        VK_S => docs::save_current(console::shift_pressed()),
+        VK_N => docs::new_document(),
+        VK_O => docs::open_dialog(),
+        VK_W => {
             let current = state::read(|s| s.current).unwrap_or(0);
             docs::close_tab(current);
         }
@@ -472,6 +519,12 @@ fn on_key_press(vk: u32) -> bool {
 }
 
 // ------------------------------------------------------------------ commands
+
+/// Runs a menu or toolbar command by id. The debug hook reaches it through
+/// `{MENU:n}` so a test can press a menu item without a mouse.
+pub fn invoke_command(id: u32) {
+    run_command(id);
+}
 
 fn run_command(id: u32) {
     use cmd::*;
@@ -504,7 +557,7 @@ fn run_command(id: u32) {
 fn edit_command(which: u32) {
     let hwnd = state::read(|s| s.editor.handle.hwnd().map(|h| h as *mut c_void)).flatten();
     if let Some(hwnd) = hwnd {
-        console::send_command(hwnd, which);
+        console::send_message(hwnd, which, 0, 0);
     }
 }
 
@@ -531,9 +584,9 @@ fn show_about() {
     let text = format!(
         "Windows PowerShell 7 ISE, version {}\n\n\
          An open-source clone of the PowerShell Integrated Scripting Environment.\n\
-         PowerShell 7 is hosted in this process through hostfxr: the interactive\n\
-         console, the tabbed script editor and TabExpansion2 completion are all\n\
-         built on native Windows controls.",
+         PowerShell 7 runs in PowerShellEngineHost.exe next to this program, so the\n\
+         console, the tabbed script editor and TabExpansion2 completion talk to a\n\
+         real runspace. The Windows controls are native; no web view is involved.",
         VERSION
     );
     match state::read(|s| s.window.handle) {
