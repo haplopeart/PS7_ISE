@@ -1,0 +1,13 @@
+# Rust build output. dist\ is the published app and is committed on purpose.
+/target
+
+# .NET intermediates; the publish output that matters lives in dist\.
+**/bin/
+**/obj/
+/PowerShellEngineHost/publish/
+
+# Editor and Windows noise
+.vs/
+*.user
+Thumbs.db
+Desktop.ini

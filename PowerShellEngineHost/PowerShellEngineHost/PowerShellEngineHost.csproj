@@ -1,0 +1,55 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <StartupObject>PowerShellEngineHost.Program</StartupObject>
+    <!--
+      Must match the target framework of Microsoft.PowerShell.SDK below: the 7.6.x
+      package is built for net10.0 (7.4.x was net8.0, 7.5.x was net9.0). Keeping both in
+      one place, so bumping the package is a single edit.
+    -->
+    <PowerShellVersion>7.6.10</PowerShellVersion>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>PowerShellEngineHost</AssemblyName>
+    <RootNamespace>PowerShellEngineHost</RootNamespace>
+    <!--
+      NOTE: Native AOT must NOT be used here. System.Management.Automation relies on
+      reflection and is not AOT-compatible; publishing with PublishAot=true produces an
+      image in which PowerShell.Create() throws as soon as a pipeline is created.
+    -->
+    <PublishAot>false</PublishAot>
+    <!--
+      The front-end starts this as a child process, so the publish output has to be a
+      normal application folder: an apphost plus runtimeconfig.json, and a flat layout so
+      that System.Management.Automation.dll and the PowerShell modules sit next to it
+      (that is how PowerShell derives $PSHome and $PSModulePath).
+    -->
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <UseAppHost>true</UseAppHost>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>CA1416;CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Microsoft.PowerShell.SDK carries the real, runnable PowerShell 7 engine and its
+      modules. The System.Management.Automation package is a reference assembly only:
+      it compiles, but modules fail to load at runtime ("Could not load type
+      'System.Management.Automation.PSSnapIn'").
+
+      This is the PowerShell the console pane actually runs: the banner prints
+      $PSVersionTable.PSVersion straight out of this assembly, so raising this number -
+      and TargetFramework above to the framework that release is built for - is all it
+      takes to move to a newer PowerShell.
+    -->
+    <PackageReference Include="Microsoft.PowerShell.SDK" Version="$(PowerShellVersion)" />
+  </ItemGroup>
+
+</Project>

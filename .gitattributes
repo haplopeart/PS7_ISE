@@ -1,0 +1,9 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Never touch the published binaries in dist\
+*.dll binary
+*.exe binary
+*.pdb binary
+*.png binary
+*.so binary

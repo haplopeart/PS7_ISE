@@ -1,0 +1,22 @@
+[package]
+name = "powershell_ise_clone"
+version = "1.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/haplopeart/PS7_ISE"
+authors = ["haplopeart"]
+description = "An open-source PowerShell ISE that hosts PowerShell 7"
+
+# The shipped binary keeps the name the original ISE uses, with 7 to show it hosts
+# pwsh rather than Windows PowerShell 5.1.
+[[bin]]
+name = "PS7_ISE"
+path = "src/main.rs"
+
+[dependencies]
+native-windows-gui = { version = "1.0", features = ["rich-textbox", "menu", "file-dialog", "tabs"] }
+
+[profile.release]
+opt-level = 2
+lto = false
+strip = true
