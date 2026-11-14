@@ -38,6 +38,10 @@ public static class Program
 
     public static int Main()
     {
+        // Trace that this method runs at all. Written to the engine's own folder so a
+        // permission problem with C:\ cannot hide it, and to a name nothing else uses.
+        File.WriteAllText("engine-main-reached.txt",
+            "started at " + DateTime.Now.ToLongTimeString());
         // Standard output carries the protocol. Anything PowerShell or a native program
         // writes straight to the console is diverted to standard error so that a stray
         // write cannot split a record in half.
@@ -55,6 +59,30 @@ public static class Program
         }
 
         var session = new Session();
+
+        // Opened before the handles move below: once NativeConsole has replaced standard input,
+        // asking .NET for it would return the empty pipe meant for native commands and the
+        // protocol's own records would never arrive.
+        var protocolInput = Console.OpenStandardInput();
+
+        // Native programs are given their standard handles when they are created, so the
+        // handles have to be moved before PowerShell exists; a command already running would
+        // keep the protocol pipe it was born with. Their text comes back as ordinary console
+        // lines - grey for stdout, red for stderr - which is how a real console shows them.
+        try
+        {
+            NativeConsole.Start(
+                line => WriteEvent(new OutputEvent(EventKinds.Output, ConsoleColor.Gray,
+                    ConsoleColor.Black, line + Environment.NewLine)),
+                line => WriteEvent(new OutputEvent(EventKinds.Error, ConsoleColor.Red,
+                    ConsoleColor.Black, line + Environment.NewLine)));
+        }
+        catch (Exception ex)
+        {
+            // Without the pipes the shell still works; only native text would be lost.
+            Console.Error.WriteLine("native output capture unavailable: " + ex.Message);
+        }
+
         var closing = new CancellationTokenSource();
         var pump = new Thread(() => PumpEvents(session, closing.Token))
         {
@@ -62,6 +90,13 @@ public static class Program
             Name = "PS7-ISE-Protocol",
         };
         pump.Start();
+
+        string jobNotice = JobHost.Ensure();
+        if (jobNotice != null)
+        {
+            WriteEvent(new OutputEvent(EventKinds.Output, ConsoleColor.Gray,
+                ConsoleColor.Black, jobNotice + Environment.NewLine));
+        }
 
         try
         {
@@ -81,7 +116,11 @@ public static class Program
 
         // Standard input is read on its own thread: typing "exit" ends the session from
         // the runspace side, and Main must not sit blocked in ReadLine when that happens.
-        var reader = new Thread(() => ReadCommands(session)) { IsBackground = true, Name = "PS7-ISE-Input" };
+        var reader = new Thread(() => ReadCommands(session, protocolInput))
+        {
+            IsBackground = true,
+            Name = "PS7-ISE-Input",
+        };
         reader.Start();
 
         session.Closed.Wait();
@@ -96,9 +135,14 @@ public static class Program
     }
 
     /// <summary>Dispatches front-end commands until the pipe closes.</summary>
-    private static void ReadCommands(Session session)
+    /// <remarks>
+    /// The stream is passed in rather than opened here: standard input has since been pointed at
+    /// the pipe native commands read from, so the protocol's own handle is only reachable through
+    /// what Main kept before that happened.
+    /// </remarks>
+    private static void ReadCommands(Session session, Stream protocolInput)
     {
-        using (var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false)))
+        using (var input = new StreamReader(protocolInput, new UTF8Encoding(false)))
         {
             string command;
             while ((command = input.ReadLine()) != null)

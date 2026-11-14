@@ -35,6 +35,12 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <NoWarn>CA1416;CS1591</NoWarn>
+    <!--
+      The machine only has x64 Microsoft.NETCore.App 10.0.1+ installed, not exactly 10.0.0.
+      Allow the app to roll forward to the nearest available patch rather than failing at
+      launch because the exact canonical version is missing.
+    -->
+    <RollForward>LatestMinor</RollForward>
   </PropertyGroup>
 
   <ItemGroup>

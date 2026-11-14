@@ -146,6 +146,30 @@ impl Engine {
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
+        // The engine is published framework-dependent and the machine does not ship the exact
+        // canonical patch of Microsoft.NETCore.App that the runtimeconfig.json names. Without
+        // this the host refuses to start with "No frameworks were found", and the console pane
+        // would be dead on every machine that is not freshly provisioned. The env var is only
+        // set here - it must not be set globally, or the front-end's own .NET lookups change.
+        #[cfg(windows)]
+        command.env("DOTNET_ROLL_FORWARD", "LatestMinor");
+
+        // Trace what the engine is actually receiving, so a missing env var is diagnosable.
+        #[cfg(windows)]
+        {
+            let trace = format!(
+                "spawn {} cwd={} DOTNET_ROLL_FORWARD={:?}\n",
+                exe.display(),
+                engine_dir.display(),
+                std::env::var_os("DOTNET_ROLL_FORWARD")
+            );
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path.with_extension("spawn.log"))
+                .and_then(|mut f| std::io::Write::write_all(&mut f, trace.as_bytes()));
+        }
+
         let mut child = command
             .spawn()
             .map_err(|e| format!("Failed to start {}: {}", exe.display(), e))?;
@@ -371,8 +395,19 @@ fn read_loop(stdout: std::process::ChildStdout, state: Arc<(Mutex<EngineState>, 
                 guard.input_requested = false;
             }
 
-            // Anything else is not ours; a foreign line must not end the session.
-            _ => continue,
+            // Anything else is not ours, and a foreign line must not end the session.
+            //
+            // This is where a native command's text lands when the engine did not capture
+            // it: `DISM.exe` and `MpCmdRun.exe` write to the standard handle they inherited
+            // from the engine, which is this very pipe. Logged rather than ignored quietly,
+            // because "the command ran but never said anything" is otherwise impossible to
+            // tell apart from a command that genuinely had nothing to report.
+            _ => {
+                if crate::state::debug_enabled() {
+                    crate::state::log_line(&format!("engine: foreign line dropped: {}", record));
+                }
+                continue;
+            }
         }
 
         drop(guard);

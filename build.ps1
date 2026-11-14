@@ -27,12 +27,55 @@ param(
     [switch]$SkipEngine,
     [switch]$SkipFrontEnd,
     # Bundle the .NET runtime into dist instead of requiring it on the machine.
-    [switch]$SelfContained
+    [switch]$SelfContained,
+    # Rebuild without raising the patch number: for a repeat build of what is already there.
+    [switch]$SkipVersionBump
 )
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $dist = Join-Path $root $OutDir
+
+# Version policy: the package version in Cargo.toml is the one number, and every rebuild of
+# the exe raises its third digit. main.rs puts it in the title bar through CARGO_PKG_VERSION,
+# build.rs writes it into the exe's version resource so Explorer's Properties sheet agrees,
+# and the engine is published with the same three numbers. It is raised before anything is
+# compiled so the engine and the front-end can never disagree.
+function Set-BuildVersion {
+    param(
+        [Parameter(Mandatory)][string]$Manifest,
+        [switch]$Bump
+    )
+
+    $text = Get-Content $Manifest -Raw
+    # The first bare `version = "x.y.z"` in the file is the package's own: dependencies
+    # write `name = { version = ... }`, which does not start the line.
+    $found = [regex]::Match($text, '(?m)^version = "(\d+)\.(\d+)\.(\d+)"')
+    if (-not $found.Success) { throw "No package version found in $Manifest" }
+
+    $major = $found.Groups[1].Value
+    $minor = $found.Groups[2].Value
+    $patch = $found.Groups[3].Value
+    if ($Bump) { $patch = ([int]$patch + 1).ToString() }
+    $version = "$major.$minor.$patch"
+
+    if ($Bump) {
+        $line = "version = `"$version`""
+        $text = $text.Remove($found.Index, $found.Length).Insert($found.Index, $line)
+        # Without a byte order mark: cargo reads the manifest as plain UTF-8.
+        [IO.File]::WriteAllText($Manifest, $text, (New-Object System.Text.UTF8Encoding($false)))
+    }
+    return $version
+}
+
+$Version = Set-BuildVersion -Manifest (Join-Path $root 'Cargo.toml') -Bump:(-not $SkipVersionBump)
+# Each property in its own parentheses: the comma binds tighter than +, so a bare
+# `'-p:Version=' + $Version, ...` hands dotnet one long argument instead of three.
+$assemblyInfo = @(
+    ('-p:Version=' + $Version),
+    ('-p:AssemblyVersion=' + $Version),
+    ('-p:FileVersion=' + $Version)
+)
 
 # Reported in the build log; the csproj remains the one place that pins the version.
 $csproj = Join-Path $root 'PowerShellEngineHost\PowerShellEngineHost\PowerShellEngineHost.csproj'
@@ -43,7 +86,7 @@ if (Test-Path $csproj) {
     if ($match) { $PowerShellVersion = $match.Matches[0].Groups[1].Value }
 }
 
-Write-Host "== PS7 ISE build -> $dist" -ForegroundColor Cyan
+Write-Host "== PS7 ISE $Version build -> $dist" -ForegroundColor Cyan
 
 # cargo and dotnet write progress and warnings to standard error, which
 # $ErrorActionPreference = 'Stop' would report as a failure of the script itself. Their
@@ -64,10 +107,16 @@ if (-not $SkipEngine) {
 
     # dotnet publish never removes anything, so a folder published with an older PowerShell
     # would keep that version's assemblies and modules side by side with the new ones.
-    # dist also holds the front-end, which a -SkipFrontEnd run must survive.
-    $frontEnd = Join-Path $dist 'PS7_ISE.exe'
-    $stash = Join-Path ([IO.Path]::GetTempPath()) ('ps7ise-front-end-' + [Guid]::NewGuid().ToString('N'))
-    if ($SkipFrontEnd -and (Test-Path $frontEnd)) { Move-Item $frontEnd $stash -Force }
+    # dist also holds the front-end and the job host, which must survive.
+    $keep = @('PS7_ISE.exe', 'pwsh.exe', 'pwsh.dll', 'pwsh.deps.json', 'pwsh.runtimeconfig.json')
+    $stashDir = Join-Path ([IO.Path]::GetTempPath()) ('ps7ise-stash-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $stashDir -Force | Out-Null
+    
+    foreach ($name in $keep) {
+        $path = Join-Path $dist $name
+        if (Test-Path $path) { Move-Item $path $stashDir -Force }
+    }
+
     if (Test-Path $dist) {
         Remove-Item (Join-Path $dist '*') -Recurse -Force
     }
@@ -75,15 +124,30 @@ if (-not $SkipEngine) {
     try {
         if ($SelfContained) {
             # Carries the .NET runtime in dist, so the folder runs anywhere; costs ~200 MB.
-            Invoke-Tool dotnet @('publish', $project, '-c', 'Release', '-o', $dist,
-                '-r', 'win-x64', '--self-contained', 'true', '--nologo')
+            Invoke-Tool dotnet (@('publish', $project, '-c', 'Release', '-o', $dist,
+                '-r', 'win-x64', '--self-contained', 'true', '--nologo') + $assemblyInfo)
         } else {
-            Invoke-Tool dotnet @('publish', $project, '-c', 'Release', '-o', $dist, '--nologo')
+            Invoke-Tool dotnet (@('publish', $project, '-c', 'Release', '-o', $dist,
+                '--nologo') + $assemblyInfo)
         }
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
     } finally {
-        if (Test-Path $stash) {
-            Move-Item $stash $frontEnd -Force
+        foreach ($file in Get-ChildItem $stashDir -File) {
+            Move-Item $file.FullName (Join-Path $dist $file.Name) -Force
+        }
+        Remove-Item $stashDir -Recurse -Force
+    }
+
+    # The PowerShell 7 install ships hostfxr.dll and hostpolicy.dll, and the SDK's flat publish
+    # drags them into dist. They are the host's own runtime loader: when present in the
+    # application folder they make it look for Microsoft.NETCore.App there instead of in the
+    # machine-wide shared directory, so a framework-dependent app then fails with
+    # "No frameworks were found". Remove them so the app uses the system runtime.
+    foreach ($dll in @('hostfxr.dll', 'hostpolicy.dll')) {
+        $path = Join-Path $dist $dll
+        if (Test-Path $path) {
+            try { Remove-Item $path -Force -ErrorAction Stop }
+            catch { Write-Host ("  (could not remove " + $dll + ": it is in use)") -ForegroundColor DarkYellow }
         }
     }
 

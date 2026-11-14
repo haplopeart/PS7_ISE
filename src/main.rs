@@ -15,6 +15,7 @@ mod console;
 mod docs;
 mod engine;
 mod highlight;
+mod icons;
 mod input;
 mod state;
 
@@ -45,6 +46,20 @@ fn main() {
 
     let state = build_ui();
     state::set_state(state);
+
+    // Explorer reads the icon out of the exe; the title bar and the taskbar button are
+    // separate, and are given that same resource here.
+    let iconed = state::read(|s| {
+        s.window
+            .handle
+            .hwnd()
+            .map(|hwnd| icons::apply(hwnd as *mut c_void))
+    })
+    .flatten()
+    .unwrap_or(false);
+    if !iconed && state::debug_enabled() {
+        state::log_line("icons: the exe carries no icon resource");
+    }
 
     bind_handlers();
 

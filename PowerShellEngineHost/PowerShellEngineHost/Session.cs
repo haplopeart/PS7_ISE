@@ -123,10 +123,18 @@ public sealed class Session
     }
 
     /// <summary>
-    /// Puts the modules that were published next to this assembly first, and drops the
-    /// Windows PowerShell 5.1 locations. A 5.1 module cannot load into PowerShell 7, and
-    /// the engine reports that as "command found but the module could not be loaded",
-    /// which hides the cmdlet entirely.
+    /// Puts the modules published next to this assembly first and keeps everything else the
+    /// machine offers, in the order PowerShell itself would use.
+    ///
+    /// The Windows PowerShell 5.1 locations used to be dropped here on the theory that a 5.1
+    /// module cannot load into PowerShell 7. That is only true of the compiled ones, and the
+    /// cost of dropping them was worse than the problem: it hid commands that PowerShell 7
+    /// runs perfectly well, because the 5.1 module directories are where Windows keeps its
+    /// cmdlets. `Get-WindowsUpdateLog`, for one, comes from the `WindowsUpdate` module in
+    /// `C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules` and from nowhere else, so the
+    /// script a user writes in the original ISE stopped working here. Microsoft's own pwsh
+    /// keeps those entries in `$env:PSModulePath` and simply prefers its own, so this does
+    /// the same: ours first, the inherited set after it, nothing removed.
     /// </summary>
     private static void EnsureModulePath()
     {
@@ -151,13 +159,13 @@ public sealed class Session
         string inherited = Environment.GetEnvironmentVariable("PSModulePath") ?? string.Empty;
         foreach (string entry in inherited.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
-            if (entry.Contains("WindowsPowerShell", StringComparison.OrdinalIgnoreCase)) continue;
             Add(entry);
         }
 
         if (parts.Count > 0)
         {
-            Environment.SetEnvironmentVariable("PSModulePath", string.Join(Path.PathSeparator.ToString(), parts));
+            Environment.SetEnvironmentVariable("PSModulePath",
+                string.Join(Path.PathSeparator.ToString(), parts));
         }
     }
 
