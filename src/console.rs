@@ -14,6 +14,41 @@ const EM_EXSETSEL: u32 = WM_USER + 55;
 const EM_EXGETSEL: u32 = WM_USER + 52;
 const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
 
+/// Row and paragraph arithmetic. These are taken from `winuser.h` and `richedit.h` in the
+/// Windows SDK rather than from memory: the numbering is neither sequential nor guessable,
+/// and a wrong number is simply answered with zero. The line-number gutter counts with the
+/// same messages, so the status bar readout and the margin cannot disagree.
+/// How many display rows the control holds.
+pub const EM_GETLINECOUNT: u32 = 0x00BA;
+/// Character index that starts a given display row.
+pub const EM_LINEINDEX: u32 = 0x00BB;
+/// Display row a character sits on.
+pub const EM_LINEFROMCHAR: u32 = 0x00C9;
+/// First visible row of the control. Counts display rows, so it knows about wrapping.
+pub const EM_GETFIRSTVISIBLELINE: u32 = 0x00CE;
+/// Pixel position of a character, in the control's client area.
+pub const EM_POSFROMCHAR: u32 = WM_USER + 38;
+/// Paragraph a character belongs to: the number the user counts as "line 1, line 2...".
+pub const EM_EXLINEFROMCHAR: u32 = WM_USER + 54;
+
+/// commctrl: replaces the panels of a status bar.
+const SB_SETPARTS: u32 = WM_USER + 4;
+
+/// A status bar is one window that draws its own panels, and native-windows-gui never
+/// splits it, so `SB_SETPARTS` is sent here: without it there is a single panel and the
+/// caret readout has nowhere to go. `widths` are the right edges of the panels, and a last
+/// entry of -1 means "whatever is left".
+pub fn set_status_parts(hwnd: *mut c_void, widths: &[i32]) {
+    unsafe {
+        SendMessageW(
+            hwnd,
+            SB_SETPARTS,
+            widths.len(),
+            widths.as_ptr() as isize,
+        )
+    };
+}
+
 pub const VK_CONTROL: i32 = 0x11;
 pub const VK_SHIFT: i32 = 0x10;
 
@@ -26,7 +61,7 @@ pub struct CharRange {
 
 #[link(name = "user32")]
 extern "system" {
-    fn SendMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
+    pub fn SendMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
     pub fn GetKeyState(virtual_key: i32) -> i16;
     fn GetWindowTextLengthW(hwnd: *mut c_void) -> i32;
     fn GetWindowTextW(hwnd: *mut c_void, buffer: *mut u16, max_count: i32) -> i32;
@@ -40,9 +75,7 @@ extern "system" {
 pub fn set_window_text(hwnd: *mut c_void, text: &str) {
     let mut buffer: Vec<u16> = text.encode_utf16().collect();
     buffer.push(0);
-    unsafe {
-        SetWindowTextW(hwnd, buffer.as_ptr());
-    }
+    unsafe { SetWindowTextW(hwnd, buffer.as_ptr()) };
 }
 
 /// `RGB()` as Windows stores it: 0x00BBGGRR.

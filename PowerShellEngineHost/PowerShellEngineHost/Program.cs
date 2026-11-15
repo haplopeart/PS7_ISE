@@ -38,10 +38,6 @@ public static class Program
 
     public static int Main()
     {
-        // Trace that this method runs at all. Written to the engine's own folder so a
-        // permission problem with C:\ cannot hide it, and to a name nothing else uses.
-        File.WriteAllText("engine-main-reached.txt",
-            "started at " + DateTime.Now.ToLongTimeString());
         // Standard output carries the protocol. Anything PowerShell or a native program
         // writes straight to the console is diverted to standard error so that a stray
         // write cannot split a record in half.

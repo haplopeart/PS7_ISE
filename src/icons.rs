@@ -11,6 +11,11 @@ use std::ffi::c_void;
 
 extern "system" {
     fn GetModuleHandleW(module_name: *const u16) -> *mut c_void;
+    fn LoadLibraryExW(
+        module_name: *const u16,
+        file: *mut c_void,
+        flags: u32,
+    ) -> *mut c_void;
     fn LoadImageW(
         module: *mut c_void,
         name: *const u16,
@@ -89,4 +94,51 @@ pub fn apply(hwnd: *mut c_void) -> bool {
         };
     }
     applied
+}
+
+/// A control's text as a win32 wide string.
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// The blue-and-yellow shield the shell puts on anything that asks for Administrator:
+/// resource 78 of `imageres.dll`, which is what Explorer and Task Scheduler draw. A bare
+/// DLL name is enough, the loader looks in `System32` itself. The handle is deliberately
+/// never destroyed: the button is still pointing at it when this returns.
+fn shield() -> Option<*mut c_void> {
+    const LOAD_LIBRARY_AS_DATAFILE: u32 = 0x0000_0010;
+    /// `MAKEINTRESOURCEW(78)`, the shield, as the ordinal-in-a-pointer the API expects.
+    const SHIELD: *const u16 = 78usize as *const u16;
+    const SIDE: i32 = 16; // a toolbar button takes the small icon
+
+    let name = wide("imageres.dll");
+    let module = unsafe {
+        LoadLibraryExW(name.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_AS_DATAFILE)
+    };
+    if module.is_null() {
+        return None;
+    }
+    let icon = unsafe { LoadImageW(module, SHIELD, IMAGE_ICON, SIDE, SIDE, LR_DEFAULTCOLOR) };
+    if icon.is_null() {
+        None
+    } else {
+        Some(icon)
+    }
+}
+
+/// Puts the shield on a button instead of a caption, which is how Windows labels an
+/// escalation control: everyone recognises it, and it needs no translating. The button has
+/// to have been created with `ButtonFlags::ICON`, or it will show its (empty) text.
+pub fn set_shield(button: *mut c_void) -> bool {
+    const BM_SETIMAGE: u32 = 0x00F7;
+
+    match shield() {
+        // wParam says the image is an icon, lParam is the handle. What the message gives
+        // back is the image that was there before, so it says nothing about this one.
+        Some(icon) => {
+            send_message(button, BM_SETIMAGE, IMAGE_ICON as usize, icon as isize);
+            true
+        }
+        None => false,
+    }
 }

@@ -138,19 +138,6 @@ if (-not $SkipEngine) {
         Remove-Item $stashDir -Recurse -Force
     }
 
-    # The PowerShell 7 install ships hostfxr.dll and hostpolicy.dll, and the SDK's flat publish
-    # drags them into dist. They are the host's own runtime loader: when present in the
-    # application folder they make it look for Microsoft.NETCore.App there instead of in the
-    # machine-wide shared directory, so a framework-dependent app then fails with
-    # "No frameworks were found". Remove them so the app uses the system runtime.
-    foreach ($dll in @('hostfxr.dll', 'hostpolicy.dll')) {
-        $path = Join-Path $dist $dll
-        if (Test-Path $path) {
-            try { Remove-Item $path -Force -ErrorAction Stop }
-            catch { Write-Host ("  (could not remove " + $dll + ": it is in use)") -ForegroundColor DarkYellow }
-        }
-    }
-
     # The SDK package keeps the modules under runtimes\<rid>\lib\<framework>\Modules, but a
     # RID-specific publish flattens only assemblies. PowerShell looks for them in
     # $PSHome\Modules - next to System.Management.Automation.dll - so copy them there.
@@ -196,6 +183,20 @@ if (-not $SkipFrontEnd) {
     }
 
     Copy-Item (Join-Path $root 'target\release\PS7_ISE.exe') $dist -Force
+}
+
+# The PowerShell 7 install ships hostfxr.dll and hostpolicy.dll, and both the SDK's flat
+# publish and the job host's copy of PowerShell bring them into dist. They are the host's own
+# runtime loader: sitting in the application folder they make every .NET program there look
+# for Microsoft.NETCore.App in that folder instead of in the machine-wide shared directory,
+# and a framework-dependent app then dies with "No frameworks were found". They have to go
+# whatever the build did, including a front-end-only run that did not republish the engine.
+foreach ($dll in @('hostfxr.dll', 'hostpolicy.dll')) {
+    $path = Join-Path $dist $dll
+    if (Test-Path $path) {
+        try { Remove-Item $path -Force -ErrorAction Stop }
+        catch { Write-Host ("  (could not remove " + $dll + ": it is in use)") -ForegroundColor DarkYellow }
+    }
 }
 
 $exe = Join-Path $dist 'PS7_ISE.exe'

@@ -14,6 +14,7 @@ extern crate native_windows_gui as nwg;
 mod console;
 mod docs;
 mod engine;
+mod gutter;
 mod highlight;
 mod icons;
 mod input;
@@ -33,6 +34,14 @@ const TAB_STRIP_H: i32 = 24;
 const GAP: i32 = 4;
 const STATUS_H: i32 = 22;
 const BORDER: i32 = 2;
+/// Width of the line-number gutter to the left of the script pane. Four digits and the
+/// separator line fit in it, which is more line than any script reaches.
+const GUTTER_W: i32 = 40;
+/// The toolbar button that carries the UAC shield: the 16 px icon plus the button's own
+/// padding, and nothing else, because a shield needs no caption.
+const SHIELD_W: i32 = 34;
+/// The status bar's right-hand panel, where the caret position goes.
+const CARET_W: i32 = 150;
 
 /// Subclass ids at or below 0xFFFF belong to native-windows-gui.
 const CONSOLE_SUBCLASS_ID: usize = 0x0002_0001;
@@ -138,6 +147,10 @@ fn build_ui() -> *mut AppState {
         .build(&mut editor)
         .expect("Could not create the script pane");
 
+    // A narrow label to the left of the script pane that shows the line number of the row
+    // the caret is on, like the edit window of the original ISE. A rich edit has no built-in
+    // gutter, and painting one with WM_PAINT would fight its own paint messages, so the
+    // number is repainted from the editor's selection whenever it moves.
     let mut console: nwg::RichTextBox = Default::default();
     nwg::RichTextBox::builder()
         .parent(&window)
@@ -182,6 +195,30 @@ fn build_ui() -> *mut AppState {
     editor.set_limit(TEXT_LIMIT);
     console.set_limit(TEXT_LIMIT);
 
+    // Line numbers down the left of the script pane, like the edit window of the original
+    // ISE. A rich edit has no gutter of its own, so this is a window of `gutter`'s own class
+    // that draws them from the editor's rows, which keeps each number beside its line even
+    // when a long one is wrapped. The font is smaller than the script's, the way a margin
+    // reads; the control is given it with WM_SETFONT and keeps using it.
+    let mut gutter_font: nwg::Font = Default::default();
+    if nwg::Font::builder()
+        .family("Consolas")
+        .size(9)
+        .build(&mut gutter_font)
+        .is_err()
+    {
+        nwg::Font::builder()
+            .family("Courier New")
+            .size(9)
+            .build(&mut gutter_font)
+            .ok();
+    }
+    let parent = window.handle.hwnd().map(|h| h as *mut c_void);
+    let gutter = parent.and_then(|parent| gutter::create(parent, gutter_font.handle as *mut c_void));
+    if gutter.is_none() {
+        state::set_status("Could not create the line-number gutter");
+    }
+
     // Shell output is polled on this timer, which also starts the engine once the
     // window has been shown.
     let mut timer: nwg::Timer = Default::default();
@@ -209,6 +246,10 @@ fn build_ui() -> *mut AppState {
         console,
         status,
         console_view: console_hwnd.map(ConsoleView::new),
+        line_gutter: gutter,
+        gutter_font: Some(gutter_font),
+        caret_text: String::new(),
+        gutter_key: (0, 1, 0),
         menus: menus.0,
         menu_items: menus.1,
         items: menus.2,
@@ -347,6 +388,43 @@ fn build_toolbar(window: &nwg::Window) -> (Vec<nwg::Button>, Vec<(cmd::Id, nwg::
             Err(e) => state::set_status(&format!("Could not create the {} button ({})", label, e)),
         }
     }
+
+    // Relaunching elevated needs no words: the UAC shield on a button is the one control
+    // every Windows user reads correctly, and it does not have to be translated either. The
+    // shell draws the shield, and a tooltip says what the click will ask for.
+    let mut shield: nwg::Button = Default::default();
+    let builder = nwg::Button::builder()
+        .text("")
+        .parent(window)
+        .position((x, 1))
+        .size((SHIELD_W, TOOLBAR_H - 4))
+        .flags(nwg::ButtonFlags::VISIBLE | nwg::ButtonFlags::ICON | nwg::ButtonFlags::TAB_STOP);
+    match builder.build(&mut shield) {
+        Ok(()) => {
+            let hwnd = shield.handle.hwnd().map(|h| h as *mut c_void);
+            if !hwnd.map(icons::set_shield).unwrap_or(false) {
+                // No shield to show, so the button has to say it in words instead.
+                shield.set_text("Run as Admin");
+            }
+            let mut tip: nwg::Tooltip = Default::default();
+            if nwg::Tooltip::builder()
+                .register(&shield.handle, "Run as Administrator")
+                .build(&mut tip)
+                .is_ok()
+            {
+                // Owned by the tooltip window the builder creates; it lives as long as the
+                // button it is attached to, which is as long as the process.
+                std::mem::forget(tip);
+            }
+            handles.push((cmd::RUN_AS_ADMIN, shield.handle));
+            buttons.push(shield);
+        }
+        Err(e) => state::set_status(&format!(
+            "Could not create the Administrator button ({})",
+            e
+        )),
+    }
+
     (buttons, handles)
 }
 
@@ -376,13 +454,35 @@ fn layout() {
         s.console.set_visible(s.show_console);
 
         if s.show_script {
-            s.editor.set_position(BORDER, pane_top + TAB_STRIP_H);
-            s.editor.set_size(tabs_width, (script_h - TAB_STRIP_H).max(20) as u32);
+            let editor_left = BORDER + GUTTER_W + 2;
+            let pane_h = (script_h - TAB_STRIP_H).max(20);
+            s.editor.set_position(editor_left, pane_top + TAB_STRIP_H);
+            s.editor.set_size(
+                ((tabs_width as i32) - GUTTER_W - 2).max(20) as u32,
+                pane_h as u32,
+            );
+            if let Some(strip) = s.line_gutter {
+                // The strip shares the editor's top edge, so a number drawn at the row the
+                // editor reports lands beside the text of that row.
+                gutter::set_geometry(strip, BORDER, pane_top + TAB_STRIP_H, GUTTER_W, pane_h);
+                gutter::set_visible(strip, true);
+            }
+        } else if let Some(strip) = s.line_gutter {
+            gutter::set_visible(strip, false);
         }
         if s.show_console {
             let top = pane_top + script_h + GAP;
             s.console.set_position(BORDER, top);
             s.console.set_size(tabs_width, (height - top - STATUS_H - 2).max(40) as u32);
+        }
+
+        // A status bar has exactly one panel unless it is told otherwise, and the caret
+        // readout needs a second one at the right-hand end.
+        if let Some(bar) = s.status.handle.hwnd() {
+            console::set_status_parts(
+                bar as *mut c_void,
+                &[(width - CARET_W - BORDER).max(10), -1],
+            );
         }
     });
 }
@@ -490,6 +590,21 @@ fn on_tick() {
         return;
     }
     state::pump_engine();
+
+    // The caret readout and the line numbers both follow the script pane, so they are
+    // refreshed on the same tick that polls the shell. Each writes only when it has moved,
+    // which keeps the status bar from being rewritten twenty five times a second.
+    if let Some(pos) = state::update_caret_display() {
+        state::set_status_caret(&pos);
+    }
+    let panes = state::read(|s| {
+        let strip = *s.line_gutter.as_ref()?;
+        let editor = s.editor.handle.hwnd().map(|h| h as *mut c_void)?;
+        Some((strip, editor))
+    });
+    if let Some((strip, editor)) = panes.flatten() {
+        gutter::refresh(strip, editor);
+    }
 }
 
 /// Keyboard shortcuts. These menus cannot own Win32 accelerators, so the key messages the
@@ -564,6 +679,7 @@ fn run_command(id: u32) {
         TOGGLE_CONSOLE_PANE => toggle_panes(false),
         HELP => show_help(),
         ABOUT => show_about(),
+        RUN_AS_ADMIN => run_as_admin(),
         _ => {}
     }
 }
@@ -608,6 +724,89 @@ fn show_about() {
         Some(parent) => nwg::modal_info_message(parent, "About Windows PowerShell 7 ISE", &text),
         None => nwg::simple_message("About", &text),
     };
+}
+
+/// Relaunches this process elevated, which is what DISM and `MpCmdRun.exe` need and what
+/// the shield on a toolbar button means. The UAC prompt is Windows' own: `ShellExecuteW`
+/// with the `runas` verb is the call Explorer makes when you click "Run as administrator".
+///
+/// This instance is only closed once the new one is on its way. `SE_ERR_ACCESSDENIED` is
+/// what the shell gives back when the prompt is dismissed, and a declined prompt is not a
+/// reason to throw away the script someone has open.
+fn run_as_admin() {
+    const SW_SHOWNORMAL: i32 = 1;
+    /// The shell reports failure as a small positive number; anything above 32 is a handle.
+    const SHELL_SUCCESS: isize = 32;
+    /// `SE_ERR_ACCESSDENIED`, which is what a dismissed prompt returns.
+    const DECLINED: isize = 5;
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            state::set_status(&format!("Could not locate this executable: {}", e));
+            return;
+        }
+    };
+
+    // The new instance is asked to open the same scripts this one was started with. Each
+    // argument is quoted as the shell wants it, or a path with a space in it becomes two.
+    let params: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| {
+            let arg = arg.to_string_lossy().replace('"', "\\\"");
+            format!("\"{}\"", arg)
+        })
+        .collect();
+
+    let verb = wide("runas");
+    let file = wide(&exe.display().to_string());
+    let parameters = wide(&params.join(" "));
+
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            if parameters.len() > 1 {
+                parameters.as_ptr()
+            } else {
+                std::ptr::null()
+            },
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    if (result as isize) > SHELL_SUCCESS {
+        state::set_status("Started as Administrator");
+        nwg::stop_thread_dispatch();
+    } else if (result as isize) == DECLINED {
+        state::set_status("Elevation was declined; running without Administrator rights");
+    } else {
+        state::set_status(&format!(
+            "Could not request elevation (shell error {})",
+            result as isize
+        ));
+    }
+}
+
+/// A string as the shell wants it: UTF-16 with a terminating zero.
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    /// Returns a window handle on success and one of the `SE_ERR_*` codes below 32 on
+    /// failure, which is why it is read as an integer here.
+    fn ShellExecuteW(
+        parent: *mut c_void,
+        verb: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show: i32,
+    ) -> *mut c_void;
 }
 
 /// F1: asks the running shell for help on the command the cursor is on.

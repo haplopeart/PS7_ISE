@@ -154,21 +154,12 @@ impl Engine {
         #[cfg(windows)]
         command.env("DOTNET_ROLL_FORWARD", "LatestMinor");
 
-        // Trace what the engine is actually receiving, so a missing env var is diagnosable.
+        // The job host restores hostfxr.dll and hostpolicy.dll into this folder whenever a
+        // background job runs, because the job's own apphost asks for them there. The engine
+        // is framework-dependent and its apphost resolves the runtime through the registry,
+        // so those two files make it refuse to start. Strip them every time, before spawn.
         #[cfg(windows)]
-        {
-            let trace = format!(
-                "spawn {} cwd={} DOTNET_ROLL_FORWARD={:?}\n",
-                exe.display(),
-                engine_dir.display(),
-                std::env::var_os("DOTNET_ROLL_FORWARD")
-            );
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path.with_extension("spawn.log"))
-                .and_then(|mut f| std::io::Write::write_all(&mut f, trace.as_bytes()));
-        }
+        strip_loader(engine_dir);
 
         let mut child = command
             .spawn()
@@ -473,4 +464,20 @@ fn decode(value: &str) -> String {
     }
 
     String::from_utf16_lossy(&units)
+}
+
+/// Removes the host loader DLLs from `engine_dir`, which is where the engine and the job
+/// host live. The job host restores them when a background job runs, because the job's own
+/// apphost asks for them in its folder; the engine is framework-dependent and its apphost
+/// resolves the runtime through the registry, so they make it refuse to start. Removing a
+/// file that is not there is not an error, and a file that is in use is left alone: the
+/// next start will fail with the message the host itself gives.
+#[cfg(windows)]
+fn strip_loader(engine_dir: &Path) {
+    for dll in ["hostfxr.dll", "hostpolicy.dll"] {
+        let path = engine_dir.join(dll);
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }

@@ -72,6 +72,9 @@ pub mod cmd {
 
     pub const HELP: u32 = 40;
     pub const ABOUT: u32 = 41;
+    /// Relaunch the program with Administrator privileges, like the shield icon on the
+    /// original ISE's Run button.
+    pub const RUN_AS_ADMIN: u32 = 42;
 }
 
 /// Everything the UI needs at run time.
@@ -88,6 +91,21 @@ pub struct AppState {
     pub console: nwg::RichTextBox,
     pub status: nwg::StatusBar,
     pub console_view: Option<ConsoleView>,
+
+    /// Narrow strip to the left of the script pane that carries its line numbers, like the
+    /// edit window of the original ISE. A rich edit has no gutter of its own, so this is a
+    /// window of `gutter`'s own window class, which paints the numbers from the pane's rows
+    /// - see [`crate::gutter`].
+    pub line_gutter: Option<*mut core::ffi::c_void>,
+    /// The font those numbers are drawn in, smaller than the script's, the way a margin
+    /// reads. The strip borrows it rather than owning it, so it has to stay alive.
+    #[allow(dead_code)]
+    pub gutter_font: Option<nwg::Font>,
+    /// The caret position text in the status bar's right-hand panel, e.g. "Line 12, Col 5".
+    pub caret_text: String,
+    /// Top row, line count and strip height the line numbers were painted for, so the
+    /// update timer only invalidates the strip when one of them moved.
+    pub gutter_key: (i32, i32, i32),
 
     /// Kept alive: destroying a menu or button a handler still refers to would crash
     /// the message loop. They are never read after construction, which is the point.
@@ -223,6 +241,13 @@ pub fn set_status(text: &str) {
     read(|s| s.status.set_text(0, text));
 }
 
+/// Writes the caret readout, the status bar's second panel. `set_status` owns the first
+/// panel, which is where engine and command messages go; the two panels are laid out in
+/// `layout`, because native-windows-gui never splits the control.
+pub fn set_status_caret(text: &str) {
+    read(|s| s.status.set_text(1, text));
+}
+
 /// Reads the current length of the internal console buffer.
 pub fn console_len() -> i32 {
     read(|s| s.console_buffer.encode_utf16().count() as i32).unwrap_or(-1)
@@ -247,6 +272,63 @@ pub fn log_line(text: &str) {
     {
         let _ = writeln!(file, "{}", text);
     }
+}
+
+/// Line and column the caret sits on, counted the way the gutter counts them: the line is
+/// the paragraph the control reports, and the column is the character's offset inside that
+/// paragraph, so a line wrapped over three rows keeps numbering its characters across all
+/// three. It is all asked of the control, so the document never has to be copied.
+fn caret_position() -> (i32, i32) {
+    use crate::console::{send_message, EM_EXLINEFROMCHAR, EM_LINEFROMCHAR, EM_LINEINDEX};
+
+    let editor = read(|s| s.editor.handle.hwnd().map(|h| h as *mut core::ffi::c_void)).flatten();
+    let Some(editor) = editor else {
+        return (1, 1);
+    };
+    let caret = read(|s| s.editor.selection().start).unwrap_or(0) as i32;
+    let paragraph = send_message(editor, EM_EXLINEFROMCHAR, 0, caret as isize) as i32 + 1;
+
+    // The column is measured from the paragraph's first character, so walk up over the rows
+    // the line was wrapped onto, adding the characters each of them carries.
+    let mut row = send_message(editor, EM_LINEFROMCHAR, caret as usize, 0) as i32;
+    let mut start = send_message(editor, EM_LINEINDEX, row as usize, 0) as i32;
+    let mut col = caret - start;
+    while row > 0 {
+        let up = send_message(editor, EM_LINEINDEX, (row - 1) as usize, 0) as i32;
+        let same_paragraph =
+            send_message(editor, EM_EXLINEFROMCHAR, 0, up as isize) as i32 + 1 == paragraph;
+        if up >= start || !same_paragraph {
+            break;
+        }
+        col += start - up;
+        start = up;
+        row -= 1;
+    }
+    (paragraph.max(1), col.max(0) + 1)
+}
+
+/// Repaints the caret readout in the status bar's right-hand panel. Gives back the new text
+/// only when the caret actually moved, so the bar is not rewritten twenty five times a
+/// second, which the control would show as flicker.
+pub fn update_caret_display() -> Option<String> {
+    let (line, col) = caret_position();
+    let text = format!("Line {}, Col {}", line, col);
+    if read(|s| s.caret_text == text).unwrap_or(false) {
+        return None;
+    }
+    write(|s| s.caret_text = text.clone());
+    Some(text)
+}
+
+/// True when the script pane has scrolled or changed length since the last call, which is
+/// when the line-number strip has to be repainted. The gutter stores nothing, so this is
+/// the only state that has to be remembered.
+pub fn gutter_changed(key: (i32, i32, i32)) -> bool {
+    let changed = read(|s| s.gutter_key != key).unwrap_or(true);
+    if changed {
+        write(|s| s.gutter_key = key);
+    }
+    changed
 }
 
 /// Gives the console pane the keyboard focus.

@@ -35,7 +35,14 @@ internal static class JobHost
         try
         {
             string home = AppContext.BaseDirectory;
-            if (File.Exists(Path.Combine(home, "pwsh.exe")))
+            // A background job runs the PowerShell that sits next to this process, and the
+            // job's apphost looks for hostfxr.dll and hostpolicy.dll in its own folder. The
+            // build ships pwsh.exe but not those two - the SDK's flat publish leaves them
+            // out and the PowerShell install keeps them - so "pwsh.exe is present" is not
+            // enough: the job has to be able to start, which means the loader DLLs too.
+            bool hasLoader = File.Exists(Path.Combine(home, "hostfxr.dll"))
+                && File.Exists(Path.Combine(home, "hostpolicy.dll"));
+            if (File.Exists(Path.Combine(home, "pwsh.exe")) && hasLoader)
             {
                 return null;
             }
@@ -54,6 +61,15 @@ internal static class JobHost
             }
 
             int added = CopyJobHost(Path.GetDirectoryName(installed), home);
+            // The copy walks the PowerShell install tree and brings every leaf into dist,
+            // including hostfxr.dll and hostpolicy.dll. They sit in the same folder as
+            // pwsh.exe, and the job's apphost - the one that ships with PowerShell - asks for
+            // them in its own folder rather than in the machine-wide shared directory, so the
+            // job needs them. They break the engine's own start, whose apphost was built from
+            // the SDK and resolves the runtime through the registry instead, so they are
+            // skipped during the copy and restored from the install afterwards: the job runs
+            // with them, the engine does not.
+            RestoreLoader(Path.GetDirectoryName(installed), home);
             return "Started a PowerShell " + GetMajorMinor(installed) + " job host from "
                 + installed + " (" + added + " files added).";
         }
@@ -140,6 +156,15 @@ internal static class JobHost
         foreach (string file in SafeEnumerateFiles(source))
         {
             string name = Path.GetFileName(file);
+            // The .NET host loader. The job's apphost asks for these in its own folder, and
+            // the PowerShell install has its own copies, so they are skipped here and copied
+            // back afterwards by RestoreLoader: the job needs them, the engine does not.
+            if (name.Equals("hostfxr.dll", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("hostpolicy.dll", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             string target = Path.Combine(dest, name);
             if (!File.Exists(target))
             {
@@ -153,6 +178,33 @@ internal static class JobHost
         foreach (string sub in SafeEnumerateDirectories(source))
         {
             WalkAndCopy(sub, Path.Combine(dest, Path.GetFileName(sub)), ref added);
+        }
+    }
+
+    /// <summary>
+    /// Puts the host loader DLLs back in <paramref name="destDir"/> from the PowerShell
+    /// install. The job's apphost looks for them there, while the engine's own apphost
+    /// resolves the runtime through the registry and refuses them, so the copy happens after
+    /// the job host is in place and before anything in this folder starts.
+    /// </summary>
+    private static void RestoreLoader(string sourceDir, string destDir)
+    {
+        foreach (string dll in new[] { "hostfxr.dll", "hostpolicy.dll" })
+        {
+            string source = Path.Combine(sourceDir, dll);
+            string target = Path.Combine(destDir, dll);
+            if (!File.Exists(source) || File.Exists(target))
+            {
+                continue;
+            }
+            try
+            {
+                File.Copy(source, target, false);
+            }
+            catch (Exception ex)
+            {
+                File.AppendAllText(Trace, $"skip loader {dll}: {ex.GetType().Name}\n");
+            }
         }
     }
 
