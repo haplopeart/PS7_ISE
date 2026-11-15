@@ -717,7 +717,8 @@ fn show_about() {
          An open-source clone of the PowerShell Integrated Scripting Environment.\n\
          PowerShell 7 runs in PowerShellEngineHost.exe next to this program, so the\n\
          console, the tabbed script editor and TabExpansion2 completion talk to a\n\
-         real runspace. The Windows controls are native; no web view is involved.",
+         real runspace. The Windows controls are native; no web view is involved.\n\n\
+         Support Me on Patreon: https://patreon.com/haplopeart",
         VERSION
     );
     match state::read(|s| s.window.handle) {

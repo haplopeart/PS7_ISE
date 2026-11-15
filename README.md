@@ -6,6 +6,8 @@ controls; the shell itself runs in a child .NET process that hosts a real `PSHos
 runspace, so the console pane behaves like a console: prompt, inline output, colours,
 history, `Ctrl+C`, and Tab completion from the shell's own `TabExpansion2`.
 
+[Support Me on Patreon](https://patreon.com/haplopeart?utm_medium=unknown&utm_source=join_link&utm_campaign=creatorshare_creator&utm_content=copyLink).
+
 ![layout](docs/layout.png)
 
 The window is the original ISE arrangement: menu bar, toolbar, a tabbed script pane on
