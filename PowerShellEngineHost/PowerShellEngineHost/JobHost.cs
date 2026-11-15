@@ -23,18 +23,24 @@ using System.IO;
 internal static class JobHost
 {
     private const string EngineMajorMinor = "7.6";
-    // Absolute diagnostics path so a different working directory does not hide it.
-    private static string Trace => Path.Combine(AppContext.BaseDirectory, ".jobhost.trace");
+    // Diagnostics path: write to temp so a read-only install directory does not fail.
+    private static string Trace => Path.Combine(Path.GetTempPath(), ".jobhost.trace");
 
     /// <summary>
     /// Returns what the user should be told about jobs, or null when there is nothing to say.
     /// Never throws: a machine without PowerShell 7 simply carries on without jobs.
     /// </summary>
-    public static string Ensure()
+    public static (string notice, string jobHome) Ensure()
     {
         try
         {
-            string home = AppContext.BaseDirectory;
+            // A background job runs the PowerShell that sits in its own $PSHome, and the
+            // job's apphost looks for hostfxr.dll and hostpolicy.dll there. The install
+            // directory is read-only for a normal user, so the job host lives in the
+            // user's own AppData: copying it there is what makes Start-Job work on a
+            // freshly installed machine, and the runspace is told to use the same folder
+            // so the job can find pwsh.exe.
+            string home = JobHome();
             // A background job runs the PowerShell that sits next to this process, and the
             // job's apphost looks for hostfxr.dll and hostpolicy.dll in its own folder. The
             // build ships pwsh.exe but not those two - the SDK's flat publish leaves them
@@ -44,25 +50,25 @@ internal static class JobHost
                 && File.Exists(Path.Combine(home, "hostpolicy.dll"));
             if (File.Exists(Path.Combine(home, "pwsh.exe")) && hasLoader)
             {
-                return null;
+                return ("", home);
             }
 
             string installed = FindInstalled();
             if (installed == null)
             {
-                return "Start-Job needs pwsh.exe next to PS7_ISE.exe and no PowerShell 7 install "
-                    + "was found to copy it from, so background jobs will not run here.";
+                return ("Start-Job needs pwsh.exe next to PS7_ISE.exe and no PowerShell 7 install "
+                    + "was found to copy it from, so background jobs will not run here.", "");
             }
 
             if (!MatchesVersion(installed))
             {
-                return "Found PowerShell " + GetMajorMinor(installed)
-                    + ", but this app was built for " + EngineMajorMinor + ". Jobs may fail.";
+                return ("Found PowerShell " + GetMajorMinor(installed)
+                    + ", but this app was built for " + EngineMajorMinor + ". Jobs may fail.", "");
             }
 
             int added = CopyJobHost(Path.GetDirectoryName(installed), home);
-            // The copy walks the PowerShell install tree and brings every leaf into dist,
-            // including hostfxr.dll and hostpolicy.dll. They sit in the same folder as
+            // The copy walks the PowerShell install tree and brings every leaf into the job
+            // folder, including hostfxr.dll and hostpolicy.dll. They sit in the same folder as
             // pwsh.exe, and the job's apphost - the one that ships with PowerShell - asks for
             // them in its own folder rather than in the machine-wide shared directory, so the
             // job needs them. They break the engine's own start, whose apphost was built from
@@ -70,13 +76,25 @@ internal static class JobHost
             // skipped during the copy and restored from the install afterwards: the job runs
             // with them, the engine does not.
             RestoreLoader(Path.GetDirectoryName(installed), home);
-            return "Started a PowerShell " + GetMajorMinor(installed) + " job host from "
-                + installed + " (" + added + " files added).";
+            return ("Started a PowerShell " + GetMajorMinor(installed) + " job host from "
+                + installed + " (" + added + " files added).", home);
         }
         catch (Exception ex)
         {
-            return "Could not install a job host for Start-Job: " + ex.Message;
+            return ("Could not install a job host for Start-Job: " + ex.Message, "");
         }
+    }
+
+    /// <summary>
+    /// Where the job host lives. The install directory is read-only for a normal user, so
+    /// the job host is copied into the user's own AppData, where it can grow: a background
+    /// job resolves its assemblies from $PSHome, and $PSHome is pointed at this folder.
+    /// </summary>
+    private static string JobHome()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "HCW", "PS7ISE", "JobHost");
     }
 
     private static string GetMajorMinor(string path)

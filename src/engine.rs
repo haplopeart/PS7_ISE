@@ -466,14 +466,26 @@ fn decode(value: &str) -> String {
     String::from_utf16_lossy(&units)
 }
 
-/// Removes the host loader DLLs from `engine_dir`, which is where the engine and the job
-/// host live. The job host restores them when a background job runs, because the job's own
-/// apphost asks for them in its folder; the engine is framework-dependent and its apphost
-/// resolves the runtime through the registry, so they make it refuse to start. Removing a
-/// file that is not there is not an error, and a file that is in use is left alone: the
-/// next start will fail with the message the host itself gives.
+/// Removes the host loader DLLs from `engine_dir` when the engine is framework-dependent,
+/// which is where the engine and the job host live. The job host restores them when a
+/// background job runs, because the job's own apphost asks for them in its folder; the
+/// framework-dependent engine's apphost resolves the runtime through the registry, so they
+/// make it refuse to start. A self-contained publish is the opposite case - it bundles
+/// coreclr.dll and refuses to run without those two in its own folder - so the decision is
+/// read from the engine's runtimeconfig.json rather than from how it was built.
+///
+/// Removing a file that is not there is not an error, and a file that is in use is left
+/// alone: the next start will fail with the message the host itself gives.
 #[cfg(windows)]
 fn strip_loader(engine_dir: &Path) {
+    let rc = engine_dir.join("PowerShellEngineHost.runtimeconfig.json");
+    let framework_dependent = match std::fs::read_to_string(&rc) {
+        Ok(text) => !text.contains("includedFrameworks"),
+        Err(_) => true,
+    };
+    if !framework_dependent {
+        return;
+    }
     for dll in ["hostfxr.dll", "hostpolicy.dll"] {
         let path = engine_dir.join(dll);
         if path.is_file() {

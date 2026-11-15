@@ -93,6 +93,11 @@ public sealed class Session
         _runspace = RunspaceFactory.CreateRunspace(_host = new ISEHost(this), iss);
         _runspace.Open();
 
+        // $PSHome is read-only in PowerShell 7.6 and defaults to the Windows PowerShell
+        // v1.0 path, so Start-Job used to spawn 5.1's host. The job host's own folder is
+        // handed to the runspace through $env:PSHOME before this runs, which is the one
+        // place the value can actually be changed.
+
         // A rich text control cannot draw ANSI escapes, so ask the engine for plain text.
         InvokeSetup("$PSStyle.OutputRendering = 'PlainText'");
         // Keep the child console programs from painting the GUI with escape codes.

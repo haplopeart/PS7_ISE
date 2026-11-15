@@ -189,14 +189,29 @@ if (-not $SkipFrontEnd) {
 # publish and the job host's copy of PowerShell bring them into dist. They are the host's own
 # runtime loader: sitting in the application folder they make every .NET program there look
 # for Microsoft.NETCore.App in that folder instead of in the machine-wide shared directory,
-# and a framework-dependent app then dies with "No frameworks were found". They have to go
-# whatever the build did, including a front-end-only run that did not republish the engine.
-foreach ($dll in @('hostfxr.dll', 'hostpolicy.dll')) {
-    $path = Join-Path $dist $dll
-    if (Test-Path $path) {
-        try { Remove-Item $path -Force -ErrorAction Stop }
-        catch { Write-Host ("  (could not remove " + $dll + ": it is in use)") -ForegroundColor DarkYellow }
+# and a framework-dependent app then dies with "No frameworks were found".
+#
+# A self-contained publish is the opposite case: it bundles coreclr.dll and friends, and
+# refuses to run without hostfxr.dll and hostpolicy.dll in its own folder, so they have to
+# stay. Which case this is is read from the engine's runtimeconfig.json - "includedFrameworks"
+# is what a self-contained publish writes - rather than from the flag this script was called
+# with, so a front-end-only run that did not republish the engine is judged by what is there.
+$rc = Join-Path $dist 'PowerShellEngineHost.runtimeconfig.json'
+$frameworkDependent = $true
+if (Test-Path $rc) {
+    $text = (Get-Content $rc -Raw)
+    if ($text -match '"includedFrameworks"') { $frameworkDependent = $false }
+}
+if ($frameworkDependent) {
+    foreach ($dll in @('hostfxr.dll', 'hostpolicy.dll')) {
+        $path = Join-Path $dist $dll
+        if (Test-Path $path) {
+            try { Remove-Item $path -Force -ErrorAction Stop }
+            catch { Write-Host ("  (could not remove " + $dll + ": it is in use)") -ForegroundColor DarkYellow }
+        }
     }
+} else {
+    Write-Host "   self-contained publish: keeping hostfxr.dll and hostpolicy.dll" -ForegroundColor DarkGray
 }
 
 $exe = Join-Path $dist 'PS7_ISE.exe'
