@@ -87,20 +87,15 @@ public static class Program
         };
         pump.Start();
 
-        (string jobNotice, string jobHome) = JobHost.Ensure();
+        // Asked before the runspace opens so the notice lands above the first prompt.
+        // $PSHome cannot be redirected from here - PowerShell keeps it read-only and points it
+        // at this engine's own folder - so all this can do is tell the user whether jobs will
+        // run rather than try to arrange it.
+        string jobNotice = JobHost.Ensure();
         if (!string.IsNullOrEmpty(jobNotice))
         {
             WriteEvent(new OutputEvent(EventKinds.Output, ConsoleColor.Gray,
                 ConsoleColor.Black, jobNotice + Environment.NewLine));
-        }
-
-        // $PSHome is read-only in PowerShell 7.6, so it cannot be set from the runspace, and
-        // it defaults to the Windows PowerShell v1.0 path - which is why Start-Job used to
-        // spawn 5.1's host. The env var is what the job host actually reads, so it is set on
-        // this process before the runspace starts, which is the one place it can be changed.
-        if (!string.IsNullOrEmpty(jobHome))
-        {
-            Environment.SetEnvironmentVariable("PSHOME", jobHome);
         }
 
         try

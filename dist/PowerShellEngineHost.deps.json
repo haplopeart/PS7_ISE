@@ -7,7 +7,7 @@
   "targets": {
     ".NETCoreApp,Version=v10.0": {},
     ".NETCoreApp,Version=v10.0/win-x64": {
-      "PowerShellEngineHost/1.0.7": {
+      "PowerShellEngineHost/1.0.8": {
         "dependencies": {
           "Microsoft.PowerShell.SDK": "7.6.10"
         },
@@ -836,7 +836,7 @@
     }
   },
   "libraries": {
-    "PowerShellEngineHost/1.0.7": {
+    "PowerShellEngineHost/1.0.8": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

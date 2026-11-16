@@ -12,6 +12,11 @@ RequestExecutionLevel admin
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
+; The folder to package. makensis /DPAYLOAD=dist-setup overrides it.
+!ifndef PAYLOAD
+  !define PAYLOAD "dist"
+!endif
+
 ; Interface
 !define MUI_ABORTWARNING
 !define MUI_ICON "assets\ps7ise.ico"
@@ -34,11 +39,16 @@ RequestExecutionLevel admin
 Section "Install"
     SetOutPath $INSTDIR
 
-    ; Copy everything from dist/
-    ; The engine, the front-end, PowerShell assemblies, modules, runtimes.
-    ; Exclude the loader DLLs: they are restored by the job host on first run
-    ; and break the engine's own start-up, so they must not be in the install.
-    File /r "dist\*"
+    ; Copy the whole payload: the front-end, the engine, the PowerShell assemblies, the
+    ; modules, and - in the build this installer ships - the .NET runtime itself.
+    ;
+    ; The payload defaults to dist but is overridable so the release can package a
+    ; self-contained build without turning the repository's dist into one:
+    ;   makensis /DPAYLOAD=dist-setup PS7ISE-Installer.nsi
+    ;
+    ; Nothing is filtered out. hostfxr.dll and hostpolicy.dll stay in: a self-contained
+    ; payload needs them, and build.ps1 only strips them from a framework-dependent one.
+    File /r "${PAYLOAD}\*"
 
     ; Create a start menu shortcut
     CreateDirectory "$SMPROGRAMS\HCW"

@@ -108,7 +108,13 @@ if (-not $SkipEngine) {
     # dotnet publish never removes anything, so a folder published with an older PowerShell
     # would keep that version's assemblies and modules side by side with the new ones.
     # dist also holds the front-end and the job host, which must survive.
+    #
+    # The pwsh.* files are not published by anything: they come from the SDK package and are
+    # committed, because they are what $PSHome needs for Start-Job to find a host. A build
+    # into another folder (-OutDir) therefore has to pick them up from the committed dist,
+    # not just from what it stashed out of its own output.
     $keep = @('PS7_ISE.exe', 'pwsh.exe', 'pwsh.dll', 'pwsh.deps.json', 'pwsh.runtimeconfig.json')
+    $committed = Join-Path $root 'dist'
     $stashDir = Join-Path ([IO.Path]::GetTempPath()) ('ps7ise-stash-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $stashDir -Force | Out-Null
     
@@ -136,6 +142,19 @@ if (-not $SkipEngine) {
             Move-Item $file.FullName (Join-Path $dist $file.Name) -Force
         }
         Remove-Item $stashDir -Recurse -Force
+
+        # Whatever the stash could not supply comes from the committed payload, so a build
+        # into a fresh folder still ends up able to run background jobs.
+        foreach ($name in $keep) {
+            $path = Join-Path $dist $name
+            if (-not (Test-Path $path)) {
+                $source = Join-Path $committed $name
+                if ($source -ne $path -and (Test-Path $source)) {
+                    Copy-Item $source $path -Force
+                    Write-Host "   job host: $name from dist" -ForegroundColor DarkGray
+                }
+            }
+        }
     }
 
     # The SDK package keeps the modules under runtimes\<rid>\lib\<framework>\Modules, but a

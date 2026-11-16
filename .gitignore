@@ -1,6 +1,12 @@
 # Rust build output. dist\ is the published app and is committed on purpose.
 /target
 
+# The self-contained payload the installer packages. Built by
+# build.ps1 -SelfContained -OutDir dist-setup, then makensis /DPAYLOAD=dist-setup.
+# Kept out of the repository: it is the committed dist plus a .NET runtime.
+/dist-setup
+/dist-sc
+
 # .NET intermediates; the publish output that matters lives in dist\.
 **/bin/
 **/obj/

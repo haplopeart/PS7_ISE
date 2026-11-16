@@ -13,6 +13,21 @@ history, `Ctrl+C`, and Tab completion from the shell's own `TabExpansion2`.
 The window is the original ISE arrangement: menu bar, toolbar, a tabbed script pane on
 top, the console pane below it, and a status bar showing the current location.
 
+## Install
+
+Run `PS7ISE-Setup.exe` from the
+[latest release](https://github.com/haplopeart/PS7_ISE/releases/latest). It asks for
+elevation, installs to `C:\Program Files\HCW\PS7ISE`, puts `HCW\PS7 ISE` in the Start Menu
+with a desktop shortcut, and registers an uninstaller in Add/Remove Programs. Nothing has to
+be installed first: the installer carries the .NET runtime.
+
+To build the installer yourself you need [NSIS](https://nsis.sourceforge.io/Main_Page):
+
+```powershell
+.\build.ps1 -SelfContained -OutDir dist-setup      # the payload the installer packages
+makensis /DPAYLOAD=dist-setup PS7ISE-Installer.nsi # -> PS7ISE-Setup.exe
+```
+
 ## Requirements
 
 | | To build | To run `dist` |
@@ -21,8 +36,11 @@ top, the console pane below it, and a status bar showing the current location.
 | Rust | stable toolchain with the MSVC builder | — |
 | .NET | SDK 10.0 or newer | .NET runtime of the generation the pinned PowerShell targets (.NET 10 for PowerShell 7.6) |
 
-`build.ps1 -SelfContained` bundles the .NET runtime into `dist`, which removes the .NET
-requirement on the machine that runs it, at the cost of a much larger folder.
+`build.ps1 -SelfContained` bundles the .NET runtime into the output folder, which removes the
+.NET requirement on the machine that runs it, at the cost of a much larger folder - 37 MB
+becomes about 113 MB. The committed `dist` is the small build; the release installer packages
+a self-contained one, because `Start-Job` only works from a folder that carries the runtime
+(see [Known limitations](#known-limitations)).
 
 ## Build
 
@@ -144,6 +162,11 @@ pipeline. A child process also means a runaway command cannot take the UI down w
   refresh rewrites the document, which a normal session never notices but a command
   printing hundreds of megabytes will.
 - Windows PowerShell 5.1 is deliberately not supported.
+- `Start-Job` needs a self-contained build. A background job is a second PowerShell started
+  at `$PSHome\pwsh.exe`, `pwsh.exe` looks for its runtime only in its own folder, and
+  `$PSHome` is read-only, so the runtime has to be beside the engine. The release installer
+  ships such a build; `.\build.ps1` without `-SelfContained` prints a notice at startup and
+  leaves jobs unavailable.
 
 ## License
 
