@@ -64,6 +64,18 @@ Section "Install"
     ; Env::AddValue /APPEND "PATH" "$INSTDIR" /MACHINE
 
     ; Write the install location to the registry for uninstall
+    ;
+    ; SetRegView 64 because makensis is itself a 32-bit program: left alone, NSIS writes into
+    ; HKLM\Software\WOW6432Node, where Add/Remove Programs still finds the entry but a 64-bit
+    ; tool enumerating the real Uninstall key does not.
+    SetRegView 64
+
+    ; An install by an earlier build of this script left the entry in the 32-bit view; drop it
+    ; on upgrade so the same name does not appear twice.
+    SetRegView 32
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE"
+    SetRegView 64
+
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE" \
         "DisplayName" "PS7 ISE"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE" \
@@ -91,7 +103,12 @@ Section "Uninstall"
     RMDir "$SMPROGRAMS\HCW"
     Delete "$DESKTOP\PS7 ISE.lnk"
 
-    ; Remove registry entries
+    ; Remove registry entries. Both views: an install by an older build put the entry in
+    ; WOW6432Node, a current one puts it in the native 64-bit key, and whichever this machine
+    ; has must go, or the app stays listed in Add/Remove Programs after uninstalling.
+    SetRegView 64
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE"
+    SetRegView 32
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE"
 
     ; Remove from PATH if we added it (commented out above, so this is safe)
