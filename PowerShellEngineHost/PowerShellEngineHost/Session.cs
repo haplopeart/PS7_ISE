@@ -26,11 +26,36 @@ public sealed class Session
     private readonly ConcurrentQueue<char> _keys = new();
     private readonly List<string> _history = new();
     private readonly StringBuilder _pending = new();
+    private readonly CommandMetadata _metadata = new();
 
     private Runspace _runspace;
     private ISEHost _host;
     private Thread _worker;
     private PowerShell _running;
+
+    /// <summary>
+    /// Guards the runspace, because only one thread may have a pipeline on it - or read its
+    /// session state - at a time. The prompt loop holds it for as long as a command runs; the
+    /// protocol thread takes it, without waiting, to answer a Tab completion or a command
+    /// metadata request, and says "busy" when it cannot have it. A submitted command is the one
+    /// thing that waits for it, which is the direction that matters: a panel request can never
+    /// be standing on the runspace when a command starts. Asking the same runspace a second
+    /// question while it is executing is not merely untidy - it is the kind of thing that ends
+    /// the process rather than the pipeline.
+    /// </summary>
+    private readonly object _runspaceGate = new();
+
+    /// <summary>
+    /// How long a submitted command waits for the runspace while a command list is being read.
+    /// A command cannot overtake a list that is already being written - both are handled by the
+    /// thread that reads the front end's commands, so the line simply waits its turn - which
+    /// makes this the bound on how long the prompt can appear to do nothing. Reading the list is
+    /// a second the first time and a twentieth afterwards, so two seconds is generous, and a
+    /// read wedged longer than that is a reason to say so rather than to wait forever. The
+    /// protocol thread can also be holding the gate for a Tab completion, which is the same
+    /// trade: it is one line waiting for another line, and bounded either way.
+    /// </summary>
+    private static readonly TimeSpan GateWait = TimeSpan.FromSeconds(2);
 
     private int _exitCode;
     private volatile bool _exit;
@@ -40,6 +65,9 @@ public sealed class Session
     /// <summary>The prompt the loop last printed, kept so it can be printed again after the
     /// front end clears the console pane.</summary>
     private volatile string _lastPrompt = string.Empty;
+
+    /// <summary>The directory the prompt last showed, for the moment the runspace is busy.</summary>
+    private volatile string _lastCwd = string.Empty;
 
     /// <summary>Signaled once the prompt loop is over, whatever ended it.</summary>
     public System.Threading.ManualResetEventSlim Closed { get; } = new System.Threading.ManualResetEventSlim(false);
@@ -53,15 +81,19 @@ public sealed class Session
     public bool KeyAvailable => !_keys.IsEmpty;
 
     /// <summary>
-    /// Tab completion, via the same TabExpansion2 machinery the real console uses.
+    /// Tab completion, via the same TabExpansion2 machinery the real console uses. It reads the
+    /// same runspace the prompt loop is using, so it holds the gate for as long as it takes -
+    /// which can be a while, because completing a word can autoload a module.
     /// </summary>
     public IEnumerable<CompletionResult> GetCompletions(string input, int caret)
     {
         if (_runspace == null || _busy) return Array.Empty<CompletionResult>();
+        if (!Monitor.TryEnter(_runspaceGate, TimeSpan.Zero)) return Array.Empty<CompletionResult>();
 
         PowerShell ps = null;
         try
         {
+            if (_busy || _runspace == null) return Array.Empty<CompletionResult>();
             caret = Math.Clamp(caret, 0, input.Length);
             ps = PowerShell.Create();
             ps.Runspace = _runspace;
@@ -76,6 +108,58 @@ public sealed class Session
         finally
         {
             ps?.Dispose();
+            Monitor.Exit(_runspaceGate);
+        }
+    }
+
+    /// <summary>
+    /// Command metadata for the Commands panel. Given back as <c>null</c> when the session
+    /// cannot be asked - a command is running, the runspace is gone, or the gate is held by
+    /// something else - which is the one answer the panel needs: ask again when the console says
+    /// it is parked. A scan that read nothing is thrown rather than answered, because waiting for
+    /// a command that has already finished would send the panel round in circles.
+    ///
+    /// The fast test is <c>_busy</c>; the gate is what makes it true, because a request can
+    /// arrive between that test and the pipeline it is about to create, and the runspace must
+    /// never be stood on twice.
+    /// </summary>
+    public string GetCommandIndex(bool rescan)
+    {
+        if (_runspace == null || _busy) return null;
+        if (!Monitor.TryEnter(_runspaceGate, TimeSpan.Zero)) return null;
+
+        try
+        {
+            // Asked again on the far side of the gate: a command may have started, and the
+            // runspace may be the one that has just been disposed.
+            if (_busy || _runspace == null) return null;
+            if (rescan) _metadata.Invalidate();
+            return _metadata.BuildIndex(_runspace);
+        }
+        finally
+        {
+            Monitor.Exit(_runspaceGate);
+        }
+    }
+
+    /// <summary>
+    /// Detail for one command, or <c>null</c> when the session cannot answer right now. Throws
+    /// when the name is not a command, which is how the front end is told "no such command"
+    /// rather than being handed an empty pane.
+    /// </summary>
+    public string GetCommandDetail(string name)
+    {
+        if (_runspace == null || _busy) return null;
+        if (!Monitor.TryEnter(_runspaceGate, TimeSpan.Zero)) return null;
+
+        try
+        {
+            if (_busy || _runspace == null) return null;
+            return _metadata.BuildDetail(_runspace, name);
+        }
+        finally
+        {
+            Monitor.Exit(_runspaceGate);
         }
     }
 
@@ -111,10 +195,16 @@ public sealed class Session
     {
         try
         {
-            using var ps = PowerShell.Create();
-            ps.Runspace = _runspace;
-            ps.AddScript(script);
-            ps.Invoke();
+            // The prompt loop's own reads of the runspace wait for the gate rather than giving
+            // up on it: a setup script, a version number and a prompt all have to be right, and
+            // the protocol thread holding the gate is never waiting for anything in return.
+            lock (_runspaceGate)
+            {
+                using var ps = PowerShell.Create();
+                ps.Runspace = _runspace;
+                ps.AddScript(script);
+                ps.Invoke();
+            }
         }
         catch
         {
@@ -173,11 +263,14 @@ public sealed class Session
     {
         try
         {
-            using var ps = PowerShell.Create();
-            ps.Runspace = _runspace;
-            ps.AddScript(expr);
-            var r = ps.Invoke();
-            return r.Count > 0 ? r[0].ToString() : "?";
+            lock (_runspaceGate)
+            {
+                using var ps = PowerShell.Create();
+                ps.Runspace = _runspace;
+                ps.AddScript(expr);
+                var r = ps.Invoke();
+                return r.Count > 0 ? r[0].ToString() : "?";
+            }
         }
         catch
         {
@@ -321,14 +414,17 @@ public sealed class Session
     {
         try
         {
-            using var ps = PowerShell.Create();
-            ps.Runspace = _runspace;
-            ps.AddScript("prompt", useLocalScope: true);
-            var results = ps.Invoke();
-            if (ps.HadErrors) throw new RuntimeException("prompt failed");
+            lock (_runspaceGate)
+            {
+                using var ps = PowerShell.Create();
+                ps.Runspace = _runspace;
+                ps.AddScript("prompt", useLocalScope: true);
+                var results = ps.Invoke();
+                if (ps.HadErrors) throw new RuntimeException("prompt failed");
 
-            if (results.Count > 0)
-                return string.Concat(results.Select(static r => r?.ToString() ?? string.Empty));
+                if (results.Count > 0)
+                    return string.Concat(results.Select(static r => r?.ToString() ?? string.Empty));
+            }
         }
         catch
         {
@@ -339,16 +435,30 @@ public sealed class Session
         return "PS " + cwd + "> ";
     }
 
+    /// <summary>
+    /// The directory to print in the prompt. Reading a variable is runspace work, so it goes
+    /// through the gate like everything else; the prompt is only ever drawn while the loop is
+    /// parked, which means the gate is nearly always free, and the last known directory is a
+    /// good enough answer in the one case where it is not.
+    /// </summary>
     private string CurrentLocation()
     {
+        if (!Monitor.TryEnter(_runspaceGate, TimeSpan.Zero)) return _lastCwd;
+
         try
         {
             object pwd = _runspace?.SessionStateProxy.GetVariable("PWD");
-            return pwd == null ? string.Empty : Convert.ToString(pwd);
+            string cwd = pwd == null ? _lastCwd : (Convert.ToString(pwd) ?? _lastCwd);
+            _lastCwd = cwd;
+            return cwd;
         }
         catch
         {
-            return string.Empty;
+            return _lastCwd;
+        }
+        finally
+        {
+            Monitor.Exit(_runspaceGate);
         }
     }
 
@@ -356,11 +466,45 @@ public sealed class Session
 
     private void Execute(string script)
     {
+        // Claiming the runspace before taking the gate, so a metadata request that is between
+        // its "is the session free" test and its own pipeline sees this and steps back.
         _busy = true;
         // The front-end echoes the newline for the submitted line, so these boundary
         // events carry state only.
         Emit(EventKinds.CommandStarted, ConsoleColor.Gray, ConsoleColor.Black, string.Empty);
 
+        // Waiting rather than testing. A submitted command cannot overtake a command list that
+        // is being written - the same thread handles both - so this is the wait that makes, and
+        // bounds, that queueing: reading the list is a second at the outside, and past the bound
+        // the line says so in the console instead of being swallowed. It cannot deadlock: the
+        // protocol thread waits for nothing here, it only gives way.
+        bool held = Monitor.TryEnter(_runspaceGate, GateWait);
+
+        if (held)
+        {
+            try
+            {
+                Run(script);
+            }
+            finally
+            {
+                Monitor.Exit(_runspaceGate);
+            }
+        }
+        else
+        {
+            Emit(EventKinds.Error, ConsoleColor.Red, ConsoleColor.Black,
+                "The command list is still being read. Try again in a moment." + Environment.NewLine);
+        }
+
+        // The gate is back, so a metadata request may have the runspace again from here on.
+        _busy = false;
+        Emit(EventKinds.CommandFinished, ConsoleColor.Gray, ConsoleColor.Black, string.Empty);
+    }
+
+    /// <summary>Runs one submitted line on the runspace, which the caller must be holding.</summary>
+    private void Run(string script)
+    {
         PowerShell ps = null;
         try
         {
@@ -392,10 +536,11 @@ public sealed class Session
         }
         finally
         {
+            // Let go of the pipeline before disposing it: PowerShell's own Dispose insists the
+            // state has already left Executing, and Stop() may be reaching for the same object
+            // from the protocol thread. _busy is the caller's to clear, once the gate is back.
             _running = null;
             ps?.Dispose();
-            _busy = false;
-            Emit(EventKinds.CommandFinished, ConsoleColor.Gray, ConsoleColor.Black, string.Empty);
         }
     }
 
@@ -417,9 +562,15 @@ public sealed class Session
         return StripAnsi(error.ToString()) + Environment.NewLine;
     }
 
-    /// <summary>Stops the running command (Ctrl+C equivalent). Safe from any thread.</summary>
+    /// <summary>
+    /// Stops the running command (Ctrl+C equivalent). Safe from any thread. It gives up a
+    /// command list too: from the front end the two cannot overlap, since the thread answering a
+    /// list is not reading the interrupt, but shutting down goes through here first, and that is
+    /// where a wedged read is worth stopping - the runspace is about to be disposed.
+    /// </summary>
     public void Stop()
     {
+        _metadata.Cancel();
         try
         {
             _running?.Stop();
@@ -467,8 +618,26 @@ public sealed class Session
         Stop();
         try { _input.CompleteAdding(); } catch { }
         try { _worker?.Join(TimeSpan.FromSeconds(2)); } catch { }
-        try { _runspace?.Dispose(); } catch { }
-        _runspace = null;
+
+        // Stop() above has already asked a command list to give up, so the wait is for a read
+        // that is on its way out. It is worth waiting: disposing a runspace from under a
+        // pipeline that is using it is the one thing the gate exists to prevent, and this is
+        // the only place the runspace leaves.
+        bool held = Monitor.TryEnter(_runspaceGate, GateWait);
+        try
+        {
+            _runspace?.Dispose();
+        }
+        catch
+        {
+            // A runspace that will not close is not worth the exit over.
+        }
+        finally
+        {
+            _runspace = null;
+            if (held) Monitor.Exit(_runspaceGate);
+        }
+
         Closed.Set();
     }
 

@@ -15,6 +15,8 @@ namespace PowerShellEngineHost;
 /// Commands   (front-end -> engine, one per line)
 ///   L &lt;text&gt;   a line was submitted at the prompt
 ///   T &lt;caret&gt; &lt;text&gt;    ask for TabExpansion2 completions
+///   M &lt;what&gt;    command metadata for the Commands panel: "i" lists every command once,
+///           "r" lists them again after a rescan, "d &lt;name&gt;" describes one command
 ///   S         interrupt the running command (Ctrl+C)
 ///   P         print the prompt again (the front end cleared the console pane)
 ///   X         shut the session down
@@ -22,16 +24,56 @@ namespace PowerShellEngineHost;
 /// Replies    (engine -> front-end, one per line)
 ///   E &lt;kind&gt; &lt;fg&gt; &lt;bg&gt; &lt;text&gt;   one coloured run of console text
 ///   C &lt;count&gt; &lt;text&gt;        completions, separated by U+001E
+///   M &lt;what&gt; &lt;part&gt; &lt;of&gt; &lt;reply&gt; &lt;text&gt;  one chunk of a metadata reply. &lt;what&gt; is "i" for
+///           the index, "d" for one command, "e" for a request that could not be answered;
+///           parts are numbered from 1 to &lt;of&gt;, and there is always at least one, so a
+///           reply is whole exactly when the parts seen reach &lt;of&gt;. &lt;reply&gt; counts
+///           up with every answer, because a front end that has given up on one request
+///           needs to be able to tell its parts from the next request's.
 ///   Q &lt;code&gt;          the session is over
 ///
 /// Every &lt;text&gt; field is escaped so that a record never contains a line break: only
 /// printable ASCII survives literally, everything else becomes \uXXXX, and a backslash
 /// is written as \\.
+///
+/// A metadata reply is chunked because the front end reads records on a thread that holds
+/// the lock its user interface takes every fortieth of a second: one record carrying four
+/// hundred kilobytes of command list would stop that interface for as long as it takes to
+/// decode, where any number of bounded records cannot.
+///
+/// Console records and metadata parts come from different threads, so they interleave: a
+/// front end collecting a metadata reply will find console output between its parts, and has
+/// to keep the parts it has rather than treat that as the reply having failed.
 /// </summary>
 public static class Program
 {
     /// <summary>Separates completion items inside one record.</summary>
     private const char ItemSeparator = '\u001e';
+
+    /// <summary>
+    /// How much metadata one record carries. It has to be far smaller than a command list and
+    /// far larger than a record worth of overhead: the front end decodes each record while
+    /// holding the lock its UI thread takes every fortieth of a second, so this is the length
+    /// of the pause the interface can be made to take, and four dozen records for a whole
+    /// index is nothing against one record for each command.
+    /// </summary>
+    private const int MetadataChunk = 48 * 1024;
+
+    /// <summary>A longer failure is not a more useful one, it is only a heavier reply.</summary>
+    private const int MaxErrorText = 4000;
+
+    /// <summary>Counts metadata replies, so a front end can tell one answer's parts from
+    /// another's. Shared between the thread that reads commands and nothing else, but counted
+    /// safely anyway, because a reply that is sure of its own number is worth the one call.</summary>
+    private static int _metadataReply;
+
+    /// <summary>
+    /// Said when the runspace is busy. The scan is a second of work and the panel asks for it
+    /// while the user is looking at it, so it is served only at the prompt - which is also
+    /// what keeps it from being queued ahead of a Ctrl+C the user is waiting on.
+    /// </summary>
+    private const string BusyMessage =
+        "The console is running a command. The command list is ready as soon as it finishes.";
 
     private static TextWriter _protocol = Console.Out;
     private static readonly object _gate = new();
@@ -164,6 +206,10 @@ public static class Program
                             WriteCompletions(session, argument);
                             break;
 
+                        case 'M':
+                            WriteCommandMetadata(session, argument);
+                            break;
+
                         case 'S':
                             session.Stop();
                             break;
@@ -244,6 +290,98 @@ public static class Program
         catch
         {
             WriteRaw("C 0 ");
+        }
+    }
+
+    /// <summary>
+    /// Answers a metadata request. Whatever happens a reply goes back: the front end is
+    /// waiting on the part count, and a request that produced nothing would leave the
+    /// Commands panel spinning. A failure is therefore an "e" reply that says what went
+    /// wrong, not silence.
+    /// </summary>
+    private static void WriteCommandMetadata(Session session, string argument)
+    {
+        string kind;
+        string payload;
+
+        try
+        {
+            if (argument == "i" || argument == "r")
+            {
+                string index = session.GetCommandIndex(argument == "r");
+                if (index == null)
+                {
+                    kind = "e";
+                    payload = BusyMessage;
+                }
+                else
+                {
+                    kind = "i";
+                    payload = index;
+                }
+            }
+            else if (argument.StartsWith("d", StringComparison.Ordinal))
+            {
+                string name = argument.Length > 2 ? Decode(argument.Substring(2)) : string.Empty;
+                string detail = session.GetCommandDetail(name);
+                if (detail == null)
+                {
+                    kind = "e";
+                    payload = BusyMessage;
+                }
+                else
+                {
+                    kind = "d";
+                    payload = detail;
+                }
+            }
+            else
+            {
+                kind = "e";
+                payload = "Unknown metadata request '" + argument + "'.";
+            }
+        }
+        catch (Exception ex)
+        {
+            // Get-Command and Get-Help throw for a name that is not a command, which is the
+            // answer the panel needs to show, so it is passed through rather than swallowed.
+            // Some wrappers throw with nothing to say, and an empty explanation reads in the
+            // pane as if the panel itself had failed, so the kind of failure stands in for it.
+            kind = "e";
+            string message = ex.Message;
+            payload = string.IsNullOrWhiteSpace(message) ? "The engine could not read that command: " + ex.GetType().Name + "." : message;
+        }
+
+        // Only a failure is kept short: a longer explanation is not a more useful one, it is
+        // just a heavier reply. Metadata is not trimmed at all - a command list is as long as
+        // it is, and the chunking below is what keeps it off the front end's UI thread.
+        if (kind == "e" && payload.Length > MaxErrorText) payload = payload.Substring(0, MaxErrorText);
+
+        // Counted up with every answer, including the ones that failed. The front end asks for
+        // the list again the moment something else changes - a second selection, a refresh -
+        // and a part of the answer it has already given up on has to be recognisable as such,
+        // or two replies merge into a list that matches neither.
+        int reply = Interlocked.Increment(ref _metadataReply);
+
+        int total = Math.Max(1, (payload.Length + MetadataChunk - 1) / MetadataChunk);
+        for (int i = 0, part = 1; part <= total; part++)
+        {
+            int take = Math.Min(MetadataChunk, Math.Max(0, payload.Length - i));
+
+            // Chopping a chunk anywhere would be wrong in exactly one place: between the two
+            // halves of a surrogate pair, which would hand the front end a character it cannot
+            // represent. A chunk loses its last character to the next one instead - but never
+            // down to nothing, or the part would be empty and everything after it unreachable.
+            if (take > 1 && i + take < payload.Length && char.IsHighSurrogate(payload[i + take - 1])) take--;
+
+            string piece = payload.Substring(i, take);
+            i += take;
+            WriteRaw(string.Concat(
+                "M ", kind, " ",
+                part.ToString(CultureInfo.InvariantCulture), " ",
+                total.ToString(CultureInfo.InvariantCulture), " ",
+                reply.ToString(CultureInfo.InvariantCulture), " ",
+                Encode(piece)));
         }
     }
 
