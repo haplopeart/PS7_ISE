@@ -17,6 +17,15 @@ RequestExecutionLevel admin
   !define PAYLOAD "dist"
 !endif
 
+; Version that the front-end already carries in Cargo.toml (and in the exe's version
+; resource through build.rs). Added to Add/Remove Programs so a user or tool can see
+; which build is installed without opening the exe's Properties sheet. The number must
+; stay in sync with the front end; a mismatch here is cosmetic only and never breaks
+; install or uninstall.
+!ifndef VERSION
+  !define VERSION "1.1.0"
+!endif
+
 ; Interface
 !define MUI_ABORTWARNING
 !define MUI_ICON "assets\ps7ise.ico"
@@ -84,6 +93,8 @@ Section "Install"
         "InstallLocation" "$INSTDIR"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE" \
         "Publisher" "HCW"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE" \
+        "DisplayVersion" "${VERSION}"
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE" \
         "NoModify" 1
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\PS7ISE" \

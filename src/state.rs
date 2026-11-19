@@ -5,6 +5,7 @@
 
 use crate::console::{normalize_breaks, ConsoleView};
 use crate::engine::{Engine, EventKind};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub const CONSOLE_FG: [u8; 3] = [0xCC, 0xCC, 0xCC];
@@ -162,6 +163,12 @@ pub struct AppState {
     pub console_runs: Vec<ConsoleRun>,
     pub input_open: bool,
     pub busy: bool,
+
+    /// Modules the background verifier has said will not load in PowerShell 7, with the
+    /// reason it gave. The Commands panel hides every command that belongs to one of
+    /// these, so a user scanning for `Get-Process` does not have to find out the module
+    /// behind it cannot be imported - and the reason is right there in the list.
+    pub broken_modules: HashMap<String, String>,
 
     pub history: Vec<String>,
     pub history_pos: usize,
@@ -575,6 +582,29 @@ fn apply_event(event: &crate::engine::PsEvent) {
             }
         }
         EventKind::Unknown => console_write(&event.text, CONSOLE_FG),
+        EventKind::Verification => {
+            // `name|reason` on the wire: the verifier emits one verdict per module, and the
+            // panel hides the module's commands because of it. Nothing is written to the
+            // console: this is a background scan that runs while the user is looking at the
+            // command list, and a wall of red text about modules they never asked about is
+            // exactly the kind of noise a background task should not produce.
+            let text = event.text.trim();
+            let (name, reason) = match text.split_once('|') {
+                Some((n, r)) => (n.trim(), r.trim()),
+                None => (text, ""),
+            };
+            if !name.is_empty() {
+                write(|s| {
+                    s.broken_modules.insert(name.to_string(), reason.to_string());
+                });
+                if crate::state::debug_enabled() {
+                    crate::state::log_line(&format!(
+                        "verification: the {} module could not be loaded: {}",
+                        name, reason
+                    ));
+                }
+            }
+        }
     }
 }
 

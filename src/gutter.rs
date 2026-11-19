@@ -46,11 +46,21 @@ const DT_SINGLELINE: u32 = 0x0020;
 const DT_NOPREFIX: u32 = 0x0800;
 const TRANSPARENT: i32 = 1;
 
-/// The strip is the same white as the pane, the numbers are the grey of a margin note, and
-/// a hairline separates the two. COLORREF is 0x00BBGGRR, the reverse of the usual order.
-const GUTTER_BG: u32 = 0x00FF_FFFF;
-const NUMBER_FG: u32 = 0x00A0_A0_A0;
-const SEPARATOR: u32 = 0x00DC_DC_DC;
+/// The strip is the same colour as the pane beside it, the numbers are the grey of a margin note,
+/// and a hairline separates the two. None of them is a constant any more: a white strip next to a
+/// dark pane, or a dark strip next to a white one, is the half-dark window `theme` exists to
+/// prevent. COLORREF is 0x00BBGGRR, the reverse of the order the palette keeps colours in.
+fn gutter_bg() -> u32 {
+    crate::console::colorref(crate::theme::palette().gutter_bg) as u32
+}
+
+fn number_fg() -> u32 {
+    crate::console::colorref(crate::theme::palette().gutter_fg) as u32
+}
+
+fn separator() -> u32 {
+    crate::console::colorref(crate::theme::palette().gutter_sep) as u32
+}
 
 /// Row height to fall back on when the pane holds a single row, so there is no second row
 /// to measure against. Only used for rows that do not exist in that case.
@@ -361,14 +371,14 @@ unsafe fn paint(hdc: *mut c_void, strip: *mut c_void) {
         right: wide,
         bottom: high,
     };
-    fill(hdc, &rc, GUTTER_BG);
+    fill(hdc, &rc, gutter_bg());
     let edge = Rect {
         left: rc.right - 1,
         top: 0,
         right: rc.right,
         bottom: rc.bottom,
     };
-    fill(hdc, &edge, SEPARATOR);
+    fill(hdc, &edge, separator());
 
     // The strip is laid out against the editor's *window*, while the positions the editor
     // reports are inside its client area. Mapping the one origin into screen space and
@@ -388,7 +398,7 @@ unsafe fn paint(hdc: *mut c_void, strip: *mut c_void) {
     } else {
         SelectObject(hdc, font)
     };
-    SetTextColor(hdc, NUMBER_FG);
+    SetTextColor(hdc, number_fg());
     SetBkMode(hdc, TRANSPARENT);
 
     let mut row_h = 0i32;

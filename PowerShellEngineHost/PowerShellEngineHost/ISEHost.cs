@@ -20,6 +20,12 @@ public static class EventKinds
     public const int CommandFinished = 9;
     public const int InputRequested = 10;
     public const int InputEcho = 11;
+    /// <summary>
+    /// One module's verdict from the background verifier: whether it imports into a fresh
+    /// PowerShell 7 session and, if not, why. The Commands panel uses these to hide commands
+    /// whose module will not load, and to say why.
+    /// </summary>
+    public const int Verification = 12;
 }
 
 /// <summary>One colored run of text destined for the console pane.</summary>
@@ -66,6 +72,12 @@ public sealed class ISEHost : PSHost
 
     public override PSHostUserInterface UI => _ui;
 
+    /// <summary>
+    /// The colour plumbing, typed. The default pair and <c>ResetColor</c> live on the raw
+    /// interface, and going through <see cref="UI"/> would mean casting at every use.
+    /// </summary>
+    public ISERawUserInterface RawInterface => _ui.Raw;
+
     public override System.Globalization.CultureInfo CurrentCulture
         => System.Globalization.CultureInfo.CurrentCulture;
 
@@ -102,6 +114,9 @@ public sealed class ISEHostUserInterface : PSHostUserInterface
     }
 
     public override PSHostRawUserInterface RawUI => _raw;
+
+    /// <summary>The same object typed, so the session can reach the colour defaults.</summary>
+    public ISERawUserInterface Raw => _raw;
 
     public override Dictionary<string, PSObject> Prompt(string caption, string message,
         System.Collections.ObjectModel.Collection<FieldDescription> descriptions)
@@ -239,8 +254,69 @@ public sealed class ISERawUserInterface : PSHostRawUserInterface
         _session = session;
     }
 
-    public override ConsoleColor ForegroundColor { get; set; } = ConsoleColor.Gray;
-    public override ConsoleColor BackgroundColor { get; set; } = ConsoleColor.Black;
+    /// <summary>
+    /// The colour the next <c>Write</c> without one of its own will use. Fields rather than the
+    /// auto-properties this used to be: a command that sets a colour and never puts it back was
+    /// then setting it for everything that came after it, the prompt included, because the base
+    /// class has no way back from an auto-property. <see cref="ResetColor"/> is how it gets back,
+    /// and it goes to the defaults below rather than to a guess.
+    /// </summary>
+    private ConsoleColor _foreground = ConsoleColor.Gray;
+
+    private ConsoleColor _background = ConsoleColor.Black;
+
+    /// <summary>
+    /// The pair the session treats as its own: what the profile left the colours at, which is
+    /// what the prompt is drawn in and what everything returns to once the command that changed
+    /// them has finished. PowerShell's console keeps this the same way - the prompt is not part
+    /// of the last command's output, so it does not inherit the last command's colours.
+    /// </summary>
+    private ConsoleColor _defaultForeground = ConsoleColor.Gray;
+
+    private ConsoleColor _defaultBackground = ConsoleColor.Black;
+
+    public override ConsoleColor ForegroundColor
+    {
+        get => _foreground;
+        set => _foreground = value;
+    }
+
+    public override ConsoleColor BackgroundColor
+    {
+        get => _background;
+        set => _background = value;
+    }
+
+    /// <summary>The colour the prompt is drawn in: the session's own, not the last write's.</summary>
+    public ConsoleColor DefaultForegroundColor => _defaultForeground;
+
+    public ConsoleColor DefaultBackgroundColor => _defaultBackground;
+
+    /// <summary>
+    /// Adopts the colours now in effect as the session's own. Called once the profile has run, so
+    /// a profile that says <c>$Host.UI.RawUI.ForegroundColor = 'Green'</c> has said something about
+    /// the prompt and not about one command's output.
+    /// </summary>
+    public void CaptureDefaults()
+    {
+        _defaultForeground = _foreground;
+        _defaultBackground = _background;
+    }
+
+    /// <summary>
+    /// Puts the colours back the way the session likes them. Nothing calls this today: a command
+    /// that sets <c>$Host.UI.RawUI.ForegroundColor</c> means to set it for what follows, the way
+    /// the real console does, so the session does not undo it. It stays because
+    /// <c>PSHostRawUserInterface</c> has no <c>ResetColor</c> to override, so a script that wants
+    /// its colours back has no other way to ask - the front end hands this to one if that ever
+    /// comes up.
+    /// </summary>
+    public void RestoreDefaults()
+    {
+        _foreground = _defaultForeground;
+        _background = _defaultBackground;
+    }
+
     public override int CursorSize { get; set; } = 25;
 
     /// <summary>Not overridable on this host type; kept for $host.UI.RawUI callers.</summary>

@@ -4,6 +4,7 @@
 //! (the old `set_text` approach) resets the caret and the undo stack, which is what made
 //! the script pane impossible to type in.
 
+use crate::theme;
 use native_windows_gui as nwg;
 
 const KEYWORDS: &[&str] = &[
@@ -18,14 +19,13 @@ const OPERATORS: &[&str] = &[
     "notcontains", "in", "notin", "replace", "split", "join", "band", "bor", "shl", "shr",
 ];
 
-const COMMENT: [u8; 3] = [0x00, 0x80, 0x00];
-const STRING: [u8; 3] = [0x8B, 0x00, 0x00];
-const VARIABLE: [u8; 3] = [0xC0, 0x40, 0x00];
-const PARAMETER: [u8; 3] = [0x00, 0x72, 0x9B];
-const NUMBER: [u8; 3] = [0x80, 0x00, 0x80];
-const KEYWORD: [u8; 3] = [0x00, 0x00, 0xFF];
-const COMMAND: [u8; 3] = [0x00, 0x00, 0x8B];
-const TEXT: [u8; 3] = [0x00, 0x00, 0x00];
+/// The script pane's syntax colours. They are not constants any more: the eight below were written
+/// for a white page - `TEXT` is plain black - and on the palette's dark background that is black
+/// text on black. `theme` holds one set per app mode and this module reads whichever is in force.
+/// The light set is the old values, exactly, so a machine in light mode sees what 1.0.9 drew.
+fn syntax() -> &'static theme::Syntax {
+    &theme::palette().syntax
+}
 
 /// Maps character positions in the string we colour to indices inside the control,
 /// because a rich text control may count a line break as one character while the string
@@ -63,6 +63,25 @@ fn colour(rtb: &nwg::RichTextBox, range: std::ops::Range<u32>, color: [u8; 3], b
 
 /// Repaints the colours of `text`, leaving the caret where the user left it.
 pub fn highlight(rtb: &nwg::RichTextBox, text: &str) {
+    // The eight rules below name the colours they paint with, and those names come from whichever
+    // set the palette is holding: black text and navy keywords on a white page in light mode, the
+    // editor's own greys and blues in dark mode. They keep the upper-case names the rules are
+    // written against so the lexer below reads as it always did.
+    #[allow(non_snake_case)]
+    let (COMMENT, STRING, VARIABLE, PARAMETER, NUMBER, KEYWORD, COMMAND, TEXT) = {
+        let s = syntax();
+        (
+            s.comment,
+            s.string,
+            s.variable,
+            s.parameter,
+            s.number,
+            s.keyword,
+            s.command,
+            s.text,
+        )
+    };
+
     let caret = rtb.selection();
     let index = control_indices(text);
     let chars: Vec<char> = text.chars().collect();

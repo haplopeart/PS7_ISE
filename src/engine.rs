@@ -55,6 +55,10 @@ pub enum EventKind {
     CommandFinished,
     InputRequested,
     InputEcho,
+    /// One module's verdict from the background verifier: whether it imports into a fresh
+    /// PowerShell 7 session and, if not, why. The Commands panel uses these to hide commands
+    /// whose module will not load, and to say why.
+    Verification,
     Unknown,
 }
 
@@ -72,6 +76,7 @@ impl EventKind {
             9 => EventKind::CommandFinished,
             10 => EventKind::InputRequested,
             11 => EventKind::InputEcho,
+            12 => EventKind::Verification,
             _ => EventKind::Unknown,
         }
     }

@@ -72,6 +72,15 @@ public sealed class Session
     /// <summary>Signaled once the prompt loop is over, whatever ended it.</summary>
     public System.Threading.ManualResetEventSlim Closed { get; } = new System.Threading.ManualResetEventSlim(false);
 
+    /// <summary>
+    /// Verifies, in a fresh runspace, which of the modules the command index lists can actually
+    /// be imported into PowerShell 7. It runs on its own thread, takes nothing from the user's
+    /// session, and reports one verdict at a time through the same output queue as the console.
+    /// </summary>
+    private ModuleVerifier _verifier;
+
+    public CommandMetadata GetMetadata() => _metadata;
+
     public int ExitCode => _exitCode;
     public bool IsBusy => _busy;
     public bool InputRequested => _inputRequested;
@@ -182,13 +191,141 @@ public sealed class Session
         // Keep the child console programs from painting the GUI with escape codes.
         InvokeSetup("$env:TERM = 'dumb'");
 
-        Emit(EventKinds.Output, ConsoleColor.Gray, ConsoleColor.Black,
-            "PowerShell " + GetVariable("$PSVersionTable.PSVersion") + Environment.NewLine);
-        Emit(EventKinds.Output, ConsoleColor.Gray, ConsoleColor.Black,
-            "Copyright (C) Microsoft Corporation. All rights reserved." + Environment.NewLine + Environment.NewLine);
+        // The user's own PowerShell, if they keep one. A custom prompt, a set of aliases, a
+        // preferred colour: all of it lives in the profile, and an ISE that did not run it was an
+        // ISE where the user's setup had to be done again by hand every time it opened.
+        LoadProfiles();
+
+        // Whatever the profiles left the colours at is the session's idea of normal from here: the
+        // prompt is drawn in it, and each command goes back to it when it finishes.
+        _host.RawInterface.CaptureDefaults();
+
+        // The banner comes after the profile, in the colours the profile asked for, which is both
+        // the order the real console uses and the reason a profile that sets a foreground colour
+        // visibly does something the moment the window opens.
+        EmitSession(EventKinds.Output, GetBanner());
+
+        // The verifier runs after everything else is set up, so it is not asked about a module
+        // until the user has a list to look at. It uses a runspace of its own, so it never
+        // touches the session's: importing a module there would change the prompt the user sees.
+        _verifier = new ModuleVerifier(this);
+        _verifier.Start();
 
         _worker = new Thread(Loop) { IsBackground = true, Name = "PS7-ISE-Session" };
         _worker.Start();
+    }
+
+    /// <summary>
+    /// The startup banner. PowerShell's own text is not reachable as an API from a host - there is
+    /// no banner property to ask for one - so this says the two lines that matter and honours the
+    /// one switch that is real: <c>$NoLogo</c>, which is how a user turns startup text off, and a
+    /// profile that sets it is a profile talking about this session.
+    /// </summary>
+    private string GetBanner()
+    {
+        if (GetVariable("if ($NoLogo) { 'hidden' }") == "hidden") return string.Empty;
+
+        return "PowerShell " + GetVariable("$PSVersionTable.PSVersion") + Environment.NewLine +
+               "Copyright (C) Microsoft Corporation. All rights reserved." +
+               Environment.NewLine + Environment.NewLine;
+    }
+
+    /// <summary>
+    /// Dot-sources the four profiles PowerShell itself runs at startup, in PowerShell's own order,
+    /// and reports one that fails instead of dying with it.
+    ///
+    /// The four paths are PowerShell's own names for them, which leaves the question of which one
+    /// is named after this host answered the way PowerShell answers it: the host-named file is the
+    /// one the product asks for, so the profile you wrote for PowerShell 7 is the one this ISE
+    /// runs. <c>$PROFILE</c> is where those names live, and it is asked for first - but it is not
+    /// guaranteed here, because the automatic variable is something the PowerShell executable sets
+    /// up on the way in, and this is a host that was not started by it. Measured: in this runspace
+    /// <c>$PROFILE</c> is empty, so the fallback below is not a hypothetical. It builds the same
+    /// four names from <c>$PSHome</c> and the Documents folder, which is the same pair of anchors
+    /// PowerShell itself uses, so both routes reach the same files.
+    ///
+    /// Each file is dot-sourced into the session's global scope, because that is what dot-sourcing
+    /// is for: a function a profile defines has to still exist when the prompt is drawn, not go
+    /// away with the pipeline that read the file.
+    /// </summary>
+    private void LoadProfiles()
+    {
+        const string script = @"
+$p = Get-Variable -Name PROFILE -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Value
+if ($null -ne $p -and $p.CurrentUserCurrentHost) {
+    $p.AllUsersAllHosts, $p.AllUsersCurrentHost, $p.CurrentUserAllHosts, $p.CurrentUserCurrentHost
+} else {
+    $hostName = 'Microsoft.PowerShell_profile.ps1'
+    $forAll = $PSHome
+    $forUser = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell'
+    (Join-Path $forAll 'profile.ps1'),
+    (Join-Path $forAll $hostName),
+    (Join-Path $forUser 'profile.ps1'),
+    (Join-Path $forUser $hostName)
+}
+";
+        string[] paths;
+        try
+        {
+            lock (_runspaceGate)
+            {
+                using var ps = PowerShell.Create();
+                ps.Runspace = _runspace;
+                ps.AddScript(script, useLocalScope: true);
+                paths = ps.Invoke().Select(static r => r?.ToString() ?? string.Empty).ToArray();
+            }
+        }
+        catch (Exception ex)
+        {
+            // No profile paths means no profiles, which is a thinner loss than no shell.
+            Emit(EventKinds.Error, ConsoleColor.Red, ConsoleColor.Black,
+                "Could not read the profile paths: " + ex.Message + Environment.NewLine);
+            return;
+        }
+
+        foreach (string path in paths)
+        {
+            if (_exit) return;
+            if (string.IsNullOrWhiteSpace(path)) continue;
+
+            string file = path.Trim();
+            if (!File.Exists(file)) continue;
+
+            try
+            {
+                lock (_runspaceGate)
+                {
+                    using var ps = PowerShell.Create();
+                    ps.Runspace = _runspace;
+                    // Dot-sourced with the path as a quoted literal: the file is a path the user
+                    // owns, not an expression to evaluate. The leading dot is what keeps their
+                    // definitions in the session instead of in a scope that ends with the
+                    // pipeline, and there is no -LiteralPath to pass here - the dot operator takes
+                    // a path positionally and nothing else, which is what the quoting is for.
+                    ps.AddScript(". '" + file.Replace("'", "''") + "'", useLocalScope: false);
+                    ps.Invoke();
+
+                    // A profile that writes an error line is a profile with a line to fix, and the
+                    // user should see which line, so these go to the console the way any other
+                    // error does. The next profile is still read.
+                    foreach (var error in ps.Streams.Error)
+                        Emit(EventKinds.Error, ConsoleColor.Red, ConsoleColor.Black, FormatError(error));
+                }
+            }
+            catch (PipelineStoppedException)
+            {
+                // Stopped with Ctrl+C while still starting up: carry on without the rest of the
+                // profile, which is the same bargain as stopping any other command.
+                Emit(EventKinds.Output, ConsoleColor.DarkYellow, ConsoleColor.Black,
+                    "The profile was stopped before it finished." + Environment.NewLine);
+                return;
+            }
+            catch (Exception ex)
+            {
+                Emit(EventKinds.Error, ConsoleColor.Red, ConsoleColor.Black,
+                    Path.GetFileName(file) + ": " + ex.Message + Environment.NewLine);
+            }
+        }
     }
 
     private void InvokeSetup(string script)
@@ -289,7 +426,7 @@ public sealed class Session
                 string promptText = _pending.Length > 0 ? ">> " : GetPrompt();
                 if (_exit) break;
                 _lastPrompt = promptText;
-                Emit(EventKinds.Output, ConsoleColor.Gray, ConsoleColor.Black, promptText);
+                EmitSession(EventKinds.Output, promptText);
 
                 RequestInput();
                 string line;
@@ -499,6 +636,7 @@ public sealed class Session
 
         // The gate is back, so a metadata request may have the runspace again from here on.
         _busy = false;
+
         Emit(EventKinds.CommandFinished, ConsoleColor.Gray, ConsoleColor.Black, string.Empty);
     }
 
@@ -590,7 +728,22 @@ public sealed class Session
     public void RedrawPrompt()
     {
         if (!_inputRequested) return;
-        Emit(EventKinds.Output, ConsoleColor.Gray, ConsoleColor.Black, _lastPrompt);
+        EmitSession(EventKinds.Output, _lastPrompt);
+    }
+
+    /// <summary>
+    /// Emits something the shell itself is saying - the prompt, mostly - in the session's own
+    /// colours rather than the colours whatever ran last happened to leave behind. Those defaults
+    /// are what the profile asked for, which is what "the colours defined in the PowerShell
+    /// environment" means for a host that has no console buffer of its own.
+    /// </summary>
+    private void EmitSession(int kind, string text)
+    {
+        ISERawUserInterface raw = _host?.RawInterface;
+        Emit(kind,
+            raw?.DefaultForegroundColor ?? ConsoleColor.Gray,
+            raw?.DefaultBackgroundColor ?? ConsoleColor.Black,
+            text);
     }
 
     /// <summary>Queues a line typed by the user.</summary>
@@ -613,6 +766,7 @@ public sealed class Session
 
     public void Shutdown()
     {
+        _verifier?.Stop();
         _exit = true;
         try { _input.Add(string.Empty); } catch { }
         Stop();

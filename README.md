@@ -3,8 +3,9 @@
 An open-source clone of the Windows PowerShell ISE (`powershell_ise.exe`) that runs
 **PowerShell 7** instead of Windows PowerShell 5.1. The front-end is Rust on native Win32
 controls; the shell itself runs in a child .NET process that hosts a real `PSHost` and
-runspace, so the console pane behaves like a console: prompt, inline output, colours,
-history, `Ctrl+C`, and Tab completion from the shell's own `TabExpansion2`.
+runspace. The UI follows the operating system's theme (including Dark mode), and the console
+pane behaves like a console: prompt, inline output, colours, history, `Ctrl+C`, and Tab
+completion from the shell's own `TabExpansion2`.
 
 [Support Me on Patreon](https://patreon.com/haplopeart?utm_medium=unknown&utm_source=join_link&utm_campaign=creatorshare_creator&utm_content=copyLink).
 
@@ -12,7 +13,8 @@ history, `Ctrl+C`, and Tab completion from the shell's own `TabExpansion2`.
 
 The window is the original ISE arrangement: menu bar, toolbar, a tabbed script pane on
 top, the console pane below it, the Commands column down the right-hand side, and a status bar
-showing the current location.
+showing the current location. The panes and the right-hand column resize with the window to
+make the most of the screen.
 
 ## Install
 
@@ -194,12 +196,18 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 
 ## Known limitations
 
-- Windows x64 only; the UI is Win32 controls, so there is no theming beyond the console's
-  own colours.
+- Windows x64 only.
 - No script debugger: no breakpoints, no stepping, no variable inspection. The Debug menu
   holds only the three commands it can really perform - Run Script, Run Selection, Stop Run.
 - Panes split at a fixed ratio and there is no draggable splitter bar; View > Show/Hide
   switches between one pane and two.
+- The command list font is fixed at two points larger than 1.0.9 for readability.
+- The user's PowerShell profile (`$PROFILE`) is loaded at startup. A custom `prompt` function
+  will be used, but oh-my-posh and other ANSI themes are stripped of their escapes (the console
+  is rich text, not a terminal).
+- Modules that are known not to load in PowerShell 7 are filtered out of the Commands panel.
+  Verdicts are logged to the debug log (`PS7ISE_DEBUG=1`).
+
 - The console scroll-back is trimmed once it passes about 400 000 characters, and every
   refresh rewrites the document, which a normal session never notices but a command
   printing hundreds of megabytes will.
@@ -227,3 +235,18 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 ## License
 
 MIT.
+
+## Changelog
+
+### 1.1.0
+- The GUI follows the OS theme, including Dark mode.
+- Panes and the command list column resize with the window.
+- The command list font is larger and more readable.
+- The user's PowerShell profile (`$PROFILE`) is automatically loaded.
+- Command prompt colours are preserved and no longer inherited from the previous output.
+- Modules that fail to load in PowerShell 7 are automatically excluded from the command list,
+  with the reason for failure logged in the debug console.
+- Minor installer and versioning corrections.
+
+### 1.0.9
+- Commands panel implemented.

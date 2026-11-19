@@ -335,6 +335,15 @@ public static class Program
                     payload = detail;
                 }
             }
+            else if (argument.StartsWith("v", StringComparison.Ordinal))
+            {
+                // The verifier asks the session for nothing of its own: it runs in a separate
+                // runspace and writes its verdicts straight to the output queue, which is why
+                // this branch is here at all - it is not a request, it is a route for verdicts
+                // that arrived while the panel was asking about something else.
+                kind = "v";
+                payload = argument.Substring(1);
+            }
             else
             {
                 kind = "e";
@@ -362,6 +371,17 @@ public static class Program
         // and a part of the answer it has already given up on has to be recognisable as such,
         // or two replies merge into a list that matches neither.
         int reply = Interlocked.Increment(ref _metadataReply);
+
+        // A verification verdict is one module at a time, so it is never chunked: a name and
+        // a reason, separated by a pipe, is what the front end splits on.
+        if (kind == "v")
+        {
+            WriteRaw(string.Concat(
+                "M v 1 1 ",
+                reply.ToString(CultureInfo.InvariantCulture), " ",
+                Encode(payload)));
+            return;
+        }
 
         int total = Math.Max(1, (payload.Length + MetadataChunk - 1) / MetadataChunk);
         for (int i = 0, part = 1; part <= total; part++)

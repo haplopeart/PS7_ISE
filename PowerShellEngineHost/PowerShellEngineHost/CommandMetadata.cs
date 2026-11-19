@@ -101,6 +101,28 @@ public sealed class CommandMetadata
     /// means "ask when it is quiet"; a read that came back with nothing in it is thrown instead,
     /// because that is not a thing to wait for.
     /// </summary>
+    /// <summary>
+    /// The modules the cached index says commands come from, or nothing when the index has
+    /// not been read yet. Used by the background verifier, which needs a list to work through
+    /// without asking the session for anything of its own.
+    /// </summary>
+    public IEnumerable<string> GetModuleNames()
+    {
+        lock (_gate)
+        {
+            if (_index == null) return Array.Empty<string>();
+        }
+
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string row in _index.Split(Row))
+        {
+            var fields = row.Split(Field);
+            if (fields.Length > 1 && !string.IsNullOrEmpty(fields[1]))
+                names.Add(fields[1]);
+        }
+        return names;
+    }
+
     public string BuildIndex(Runspace runspace)
     {
         lock (_gate)

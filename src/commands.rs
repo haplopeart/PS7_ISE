@@ -44,6 +44,11 @@ pub enum MetadataKind {
     /// because a stream that has not been told otherwise is not holding anything good.
     #[default]
     Error,
+    /// One module's verdict from the background verifier: whether it imports into a fresh
+    /// PowerShell 7 session and, if not, why. The Commands panel hides every command that
+    /// belongs to one of these, so a user scanning for `Get-Process` does not have to find
+    /// out the module behind it cannot be imported - and the reason is right there.
+    Verification,
 }
 
 /// One complete answer, with every chunk put back in order.
@@ -89,6 +94,7 @@ impl MetadataStream {
         let kind = match kind {
             "i" => MetadataKind::Index,
             "d" => MetadataKind::Detail,
+            "v" => MetadataKind::Verification,
             _ => MetadataKind::Error,
         };
         let of = of.max(1);
@@ -325,6 +331,10 @@ pub struct CommandStore {
     detail_read_for: Option<String>,
     /// The last failure to read, in the engine's own words, kept until the next attempt.
     error: Option<String>,
+    /// Modules the background verifier has said will not load in PowerShell 7, with the
+    /// reason it gave. Every command that belongs to one of these is hidden from the list
+    /// until the user refreshes it after the module is fixed or the session changes.
+    broken: HashMap<String, String>,
 }
 
 impl CommandStore {
@@ -387,6 +397,19 @@ impl CommandStore {
                         self.detail_reads = self.detail_reads.saturating_sub(1);
                     }
                     self.backoff = READ_BACKOFF;
+                }
+                true
+            }
+            MetadataKind::Verification => {
+                // `name|reason` on the wire: the verifier emits one verdict per module, and the
+                // panel hides the module's commands because of it.
+                let text = reply.payload.trim();
+                let (name, reason) = match text.split_once('|') {
+                    Some((n, r)) => (n.trim(), r.trim()),
+                    None => (text, ""),
+                };
+                if !name.is_empty() {
+                    self.broken.insert(name.to_string(), reason.to_string());
                 }
                 true
             }
@@ -495,6 +518,12 @@ impl CommandStore {
         &self.modules
     }
 
+    /// Modules the verifier has said will not load, with the reason it gave. Used to drop
+    /// them from the Module dropdown and to hide their commands from the list.
+    pub fn broken(&self) -> &HashMap<String, String> {
+        &self.broken
+    }
+
     pub fn is_listed(&self) -> bool {
         self.listed
     }
@@ -515,9 +544,17 @@ impl CommandStore {
         self.entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| match module {
-                Some(name) => entry.module == name,
-                None => true,
+            .filter(|(_, entry)| {
+                // A module the verifier said will not load hides every command that came
+                // from it. The user can still find them by name in the console, and the
+                // reason is right there in the list of broken modules.
+                if !entry.module.is_empty() && self.broken.contains_key(&entry.module) {
+                    return false;
+                }
+                match module {
+                    Some(name) => entry.module == name,
+                    None => true,
+                }
             })
             .filter(|(_, entry)| {
                 find.is_empty() || entry.name.to_lowercase().contains(&find)

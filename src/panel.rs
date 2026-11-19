@@ -29,15 +29,31 @@ const COMMON_DIVIDER: &str = "-- common parameters --";
 const LB_GETTOPINDEX: u32 = 0x018E;
 const LB_SETTOPINDEX: u32 = 0x0197;
 
-/// How wide the column is. It has to hold a parameter row (`[x] Verbose <SwitchParameter>`)
-/// and a long command name without needing a horizontal scrollbar of its own.
-pub const WIDTH: i32 = 322;
+/// The narrowest the column is ever drawn. Below this a long command name (`Get-ComputerRestorePoint`
+/// at the column's font) is mostly ellipsis, and the whole point of the column is to recognise the
+/// command by its name.
+pub const MIN_WIDTH: i32 = 360;
+
+/// The widest it is ever drawn: past this the column is a wide empty gutter rather than a useful
+/// list, and the script and console panes are the ones losing the space.
+pub const MAX_WIDTH: i32 = 560;
+
+/// How much of the window the column asks for. A third of it, between the two bounds: on the
+/// default window that is close to what the column used to be fixed at, and on a maximised one it
+/// gives the user back the ratio they chose instead of a 322 px strip beside two enormous panes.
+pub fn width_for(client_width: i32) -> i32 {
+    (client_width * 30 / 100).clamp(MIN_WIDTH, MAX_WIDTH)
+}
 
 const PAD: i32 = 4;
 const GAP: i32 = 4;
-const ROW_H: i32 = 22;
-const NOTE_H: i32 = 16;
-const BUTTON_H: i32 = 24;
+/// The height of a single-line control: the Module dropdown, the Find box, the value box, the
+/// Use tick. It tracks the column's font, which is taller than it was, and a combo box whose
+/// height is less than its font plus its own border draws its text clipped at the top.
+const ROW_H: i32 = 26;
+/// One line of the parameter note, which is the same font and therefore needs the same room.
+const NOTE_H: i32 = 20;
+const BUTTON_H: i32 = 26;
 
 /// The first entry of the Module dropdown: show every command whatever it came from.
 const ALL_MODULES: &str = "(All modules)";
@@ -258,15 +274,17 @@ macro_rules! place {
 }
 
 /// Positions the column, and shows or hides it. Called from the frame's `layout`, which is
-/// the only place the window's size is known.
-pub fn layout(panel: &mut Commands, x: i32, y: i32, height: i32, visible: bool) {
+/// the only place the window's size is known — hence `width` rather than a constant: the column
+/// is expected to grow with the window, and a width it invented itself is how it stayed 322 px
+/// wide on a maximised window while the panes beside it doubled.
+pub fn layout(panel: &mut Commands, x: i32, y: i32, width: i32, height: i32, visible: bool) {
     set_visible(panel, visible);
     if !visible {
         return;
     }
 
     let left = x + PAD;
-    let inner = (WIDTH - 2 * PAD).max(80);
+    let inner = (width - 2 * PAD).max(80);
     let mut top = y + PAD;
 
     place!(panel.module_box, left, top, inner, ROW_H);
@@ -494,6 +512,7 @@ fn reload_modules(s: &mut state::AppState) {
             .store
             .modules()
             .iter()
+            .filter(|name| !s.commands.store.broken().contains_key(*name))
             .map(|name| module_label(name).to_string()),
     );
     s.commands.module_box.set_collection(items);

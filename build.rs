@@ -100,5 +100,38 @@ fn main() {
     resource.set("LegalCopyright", "MIT License");
     resource.set("OriginalFilename", "PS7_ISE.exe");
     resource.set("InternalName", "PS7_ISE.exe");
+    // The manifest exists to ask for one thing: version 6 of the common controls. Without it
+    // Windows gives the process the classic v5 controls, which are drawn by `user32` from system
+    // colours and ignore the dark app mode entirely - a window whose panes go dark and whose
+    // buttons, tab strip and status bar stay grey. Asking for v6 puts those controls in the hands
+    // of comctl32, which is the library that knows how to draw them dark (see `src/theme.rs`).
+    //
+    // It deliberately says nothing about DPI awareness. The fonts and layout constants in this
+    // program are measured in device units, and becoming DPI-aware without reworking every one of
+    // them would shrink the text and crowd the panes on a scaled display - a separate change, with
+    // its own testing, not something to slip in beside a theme.
+    // Write the manifest to a file and reference it from the resource script instead of
+    // embedding the XML inline: `rc.exe` on this machine's Windows SDK rejects inline
+    // manifest XML with `RC2021`, while reading it from a file works fine.
+    let manifest_path = std::env::temp_dir().join(format!("{}.manifest", env!("CARGO_PKG_NAME")));
+    let manifest_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0" processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and 11. The dark app mode is a Windows 10 feature, and an application that
+           does not declare itself compatible is not offered the newer behaviour. -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+</assembly>"#;
+    std::fs::write(&manifest_path, manifest_xml).expect("Could not write manifest file");
+    resource.set_manifest_file(manifest_path.to_str().unwrap());
     resource.compile().expect("Could not compile the Windows resources");
 }

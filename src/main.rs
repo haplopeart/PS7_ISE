@@ -21,11 +21,13 @@ mod icons;
 mod input;
 mod panel;
 mod state;
+mod theme;
 
 use console::ConsoleView;
 use nwg::Event as E;
 use state::{cmd, AppState};
 use std::ffi::c_void;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -48,8 +50,18 @@ const CARET_W: i32 = 150;
 /// Subclass ids at or below 0xFFFF belong to native-windows-gui.
 const CONSOLE_SUBCLASS_ID: usize = 0x0002_0001;
 const EDITOR_SUBCLASS_ID: usize = 0x0002_0002;
+/// The frame, for the two messages that decide whether a dark window looks dark: the one that
+/// erases its background, and the ones its child controls ask before they paint themselves.
+const FRAME_SUBCLASS_ID: usize = 0x0002_0003;
 
 fn main() {
+    // Before `nwg::init`, not merely before the controls are built: initialising native-windows-gui
+    // initialises comctl32, and comctl32 decides once, at that moment, whether its common controls
+    // - the buttons, the tab strip, the status bar - draw light or dark. Asked later, the palette
+    // still recolours everything this program paints itself and leaves the rest light, which is
+    // exactly the half-dark window the first screenshot showed.
+    let _ = theme::palette();
+
     if let Err(e) = nwg::init() {
         eprintln!("Could not start the GUI: {}", e);
         return;
@@ -118,6 +130,12 @@ fn open_command_line_scripts() {
 /// event handlers are `'static`, and the process owns the controls for its lifetime.
 #[allow(deprecated)] // nwg::Timer is the win32 SetTimer hook: it fires on this thread.
 fn build_ui() -> *mut AppState {
+    // Before anything is created: the palette reads the user's app mode, and in dark mode it tells
+    // comctl32 to draw its controls dark. That switch is read when a control is created, so a
+    // window told after the fact keeps light buttons and a light tab strip - which is the half-dark
+    // window this line exists to prevent.
+    let palette = theme::palette();
+
     let mut window: nwg::Window = Default::default();
     nwg::Window::builder()
         .size((1120, 780))
@@ -126,6 +144,12 @@ fn build_ui() -> *mut AppState {
         .flags(nwg::WindowFlags::MAIN_WINDOW | nwg::WindowFlags::VISIBLE)
         .build(&mut window)
         .expect("Could not create the main window");
+
+    // The title bar is the desktop window manager's, not this program's, and it has its own
+    // opinion about light and dark unless it is told.
+    if let Some(hwnd) = window.handle.hwnd() {
+        theme::apply_titlebar(hwnd as *mut c_void);
+    }
 
     let menus = build_menus(&window);
 
@@ -221,20 +245,25 @@ fn build_ui() -> *mut AppState {
         state::set_status("Could not create the line-number gutter");
     }
 
-    // The Commands column down the right-hand side, like the original ISE's. It gets a font of
-    // its own at 9 point: the column has to fit a parameter row (`[x] Verbose
-    // <SwitchParameter>`) and a long command name, and the panes' 11 point would leave it about
-    // a dozen characters to do that in.
+    // The Commands column down the right-hand side, like the original ISE's. It gets a font of its
+    // own because the panes' is bigger still, and the column has to fit a parameter row
+    // (`[x] Verbose <SwitchParameter>`) and a long command name in a narrow strip.
+    //
+    // `size` here is not points: native-windows-gui passes it straight to `CreateFontW` as a
+    // positive cell height in device units, so 12 is a cell about 12 units tall - around 9 points
+    // at 96 dpi - and the 9 this used to be was nearer 7, which is what made the list hard to
+    // read. The column now takes a third of the window's width rather than a fixed 322 pixels,
+    // so the extra two points of width the larger text costs has somewhere to come from.
     let mut panel_font: nwg::Font = Default::default();
     if nwg::Font::builder()
         .family("Consolas")
-        .size(9)
+        .size(12)
         .build(&mut panel_font)
         .is_err()
     {
         nwg::Font::builder()
             .family("Courier New")
-            .size(9)
+            .size(12)
             .build(&mut panel_font)
             .ok();
     }
@@ -257,6 +286,13 @@ fn build_ui() -> *mut AppState {
         let view = ConsoleView::new(hwnd);
         view.set_background(state::CONSOLE_BG);
     }
+    // The script pane's field is the other rich edit, and until now it never had one set: it took
+    // the control's own white, which is what made a dark window have a bright rectangle in the
+    // middle of it. The console deliberately keeps its terminal background in both modes, for the
+    // reason in `theme`'s header comment.
+    if let Some(hwnd) = editor.handle.hwnd().map(|h| h as *mut c_void) {
+        ConsoleView::new(hwnd).set_background(palette.editor_bg);
+    }
 
     let state = AppState {
         window,
@@ -277,6 +313,7 @@ fn build_ui() -> *mut AppState {
         buttons: buttons.0,
         button_items: buttons.1,
         _font: Some(font),
+        broken_modules: HashMap::new(),
         timer: Some(timer),
         engine_pending: true,
         split: 0.5,
@@ -464,9 +501,11 @@ fn layout() {
         };
         let (width, height) = console::client_size(hwnd as *mut c_void);
         // The Commands column takes its width off the right, and both panes give it up: the
-        // original ISE docks it the same way rather than floating it over the panes.
+        // original ISE docks it the same way rather than floating it over the panes. The width is
+        // whatever the window can spare rather than a fixed number, so a wider window widens the
+        // column along with the panes instead of leaving a strip of the old size beside them.
         let panel_width = if s.show_commands {
-            panel::WIDTH + GAP
+            panel::width_for(width) + GAP
         } else {
             0
         };
@@ -528,9 +567,13 @@ fn layout() {
             return;
         };
         let (width, height) = console::client_size(hwnd as *mut c_void);
-        let x = (width - BORDER - panel::WIDTH).max(BORDER);
+        // The same width the panes above gave up, from the same client width: if the two
+        // calculations disagreed the column would be laid out at one size while the panes
+        // reserved another, and the seam between them would move on every resize.
+        let column_w = panel::width_for(width);
+        let x = (width - BORDER - column_w).max(BORDER);
         let height = (height - TOOLBAR_H - STATUS_H - GAP).max(120);
-        panel::layout(&mut s.commands, x, TOOLBAR_H, height, s.show_commands);
+        panel::layout(&mut s.commands, x, TOOLBAR_H, column_w, height, s.show_commands);
     });
 }
 
@@ -548,6 +591,27 @@ fn bind_handlers() {
     nwg::full_bind_event_handler(&window, move |evt, data, handle| {
         dispatch(evt, data, handle)
     });
+
+    // The frame paints its own background, and answers for every child control that asks: the
+    // list boxes, the edits, the labels. Those questions arrive at the parent, so one hook on the
+    // window colours the whole column and the toolbar in one place. In light mode the palette says
+    // nothing about either message, which leaves Windows to do what it has always done.
+    if let Ok(handler) =
+        nwg::bind_raw_event_handler(&window, FRAME_SUBCLASS_ID, move |hwnd, msg, w, _l| {
+            let palette = theme::palette();
+            let dc = w as *mut c_void;
+            match msg {
+                theme::WM_ERASEBKGND => palette.erase_background(hwnd as *mut c_void, dc),
+                theme::WM_CTLCOLORSTATIC
+                | theme::WM_CTLCOLOREDIT
+                | theme::WM_CTLCOLORLISTBOX
+                | theme::WM_CTLCOLORDLG => palette.child_colour(msg, dc),
+                _ => None,
+            }
+        })
+    {
+        std::mem::forget(handler);
+    }
 
     // Bound last on purpose: the subclass chain calls the newest hook first, so the
     // console can swallow a key before the rich text control or nwg ever sees it.
