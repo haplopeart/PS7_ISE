@@ -18,6 +18,7 @@ mod engine;
 mod gutter;
 mod highlight;
 mod icons;
+mod images;
 mod input;
 mod panel;
 mod state;
@@ -41,9 +42,16 @@ const BORDER: i32 = 2;
 /// Width of the line-number gutter to the left of the script pane. Four digits and the
 /// separator line fit in it, which is more line than any script reaches.
 const GUTTER_W: i32 = 40;
-/// The toolbar button that carries the UAC shield: the 16 px icon plus the button's own
-/// padding, and nothing else, because a shield needs no caption.
-const SHIELD_W: i32 = 34;
+/// The width of a toolbar button that carries a picture: the 16 px picture plus the button's own
+/// padding, and nothing else, because the picture is the label and the tooltip holds the words.
+/// The UAC shield button and the eight drawn in `images` are all this wide, which is what makes
+/// the row read as a row.
+const PICTURE_W: i32 = 30;
+/// The gap between two toolbar buttons.
+const BUTTON_GAP: i32 = 3;
+/// The wider gap where the original ISE draws a separating line: New, Open and Save are one
+/// thing, the run buttons another, and the row is easier to read when the groups are visible.
+const GROUP_GAP: i32 = 9;
 /// The status bar's right-hand panel, where the caret position goes.
 const CARET_W: i32 = 150;
 
@@ -419,51 +427,128 @@ fn build_menus(
     (menus, kept, items)
 }
 
-/// The ISE toolbar is a row of buttons; Win32 toolbars need an image list, and text
-/// buttons keep the clone dependency-free.
+/// The toolbar: one picture per command and the words kept for the tooltip, which is how the
+/// original ISE uses this strip. The word is not decoration - it is what a button says when the
+/// machine has no GDI+ to draw its picture with, and so it decides how wide that button has to be.
+///
+/// The columns after the name are the words the tooltip says, the width the button needs when it
+/// has to say that name instead of drawing a picture, and the extra gap after the button - used
+/// where the original draws a separating line between its groups.
 fn build_toolbar(window: &nwg::Window) -> (Vec<nwg::Button>, Vec<(cmd::Id, nwg::ControlHandle)>) {
-    const LABELS: &[(cmd::Id, &str, i32)] = &[
-        (cmd::NEW, "New", 60),
-        (cmd::OPEN, "Open", 60),
-        (cmd::SAVE, "Save", 60),
-        (cmd::RUN_SCRIPT, "Run Script", 90),
-        (cmd::RUN_SELECTION, "Run Selection", 100),
-        (cmd::STOP, "Stop", 60),
-        (cmd::CLEAR_CONSOLE, "Clear Pane", 80),
-        (cmd::HELP, "Help", 60),
+    const BUTTONS: &[(cmd::Id, images::Picture, &str, &str, i32, i32)] = &[
+        (cmd::NEW, images::Picture::New, "New", "New Script (Ctrl+N)", 60, 0),
+        (
+            cmd::OPEN,
+            images::Picture::Open,
+            "Open",
+            "Open Script... (Ctrl+O)",
+            60,
+            0,
+        ),
+        (
+            cmd::SAVE,
+            images::Picture::Save,
+            "Save",
+            "Save Script (Ctrl+S)",
+            60,
+            GROUP_GAP,
+        ),
+        (
+            cmd::RUN_SCRIPT,
+            images::Picture::RunScript,
+            "Run Script",
+            "Run Script (F5)",
+            90,
+            0,
+        ),
+        (
+            cmd::RUN_SELECTION,
+            images::Picture::RunSelection,
+            "Run Selection",
+            "Run Selection (F8)",
+            100,
+            0,
+        ),
+        (
+            cmd::STOP,
+            images::Picture::Stop,
+            "Stop",
+            "Stop Run (Ctrl+C)",
+            60,
+            GROUP_GAP,
+        ),
+        (
+            cmd::CLEAR_CONSOLE,
+            images::Picture::ClearPane,
+            "Clear Pane",
+            "Clear Command Pane",
+            80,
+            0,
+        ),
+        (
+            cmd::HELP,
+            images::Picture::Help,
+            "Help",
+            "PowerShell 7 Help (F1)",
+            60,
+            GROUP_GAP,
+        ),
     ];
+
+    // A button that has to say its name: the picture is gone, so the caption is the label.
+    let word_flags = nwg::ButtonFlags::VISIBLE | nwg::ButtonFlags::TAB_STOP;
+    // A button that carries a picture, and so draws no caption at all.
+    let picture_flags =
+        nwg::ButtonFlags::VISIBLE | nwg::ButtonFlags::ICON | nwg::ButtonFlags::TAB_STOP;
 
     let mut buttons = Vec::new();
     let mut handles = Vec::new();
+    let mut tips: Vec<(nwg::ControlHandle, &str)> = Vec::new();
     let mut x = BORDER;
-    for (id, label, width) in LABELS {
+
+    for (id, picture, word, tip, word_width, gap) in BUTTONS {
+        // The picture is made before the button exists because it decides the button's shape: a
+        // picture button is square and silent, a word button has to be as wide as the word.
+        let icon = images::create(*picture);
+        let (text, width, flags) = match icon {
+            Some(_) => ("", PICTURE_W, picture_flags),
+            None => (*word, *word_width, word_flags),
+        };
+
         let mut button: nwg::Button = Default::default();
         match nwg::Button::builder()
-            .text(label)
+            .text(text)
             .parent(window)
             .position((x, 1))
-            .size((*width, TOOLBAR_H - 4))
+            .size((width, TOOLBAR_H - 4))
+            .flags(flags)
             .build(&mut button)
         {
             Ok(()) => {
+                if let Some(icon) = icon {
+                    if let Some(hwnd) = button.handle.hwnd().map(|h| h as *mut c_void) {
+                        images::set(hwnd, icon);
+                    }
+                }
                 handles.push((*id, button.handle));
-                x += width + 3;
+                tips.push((button.handle, tip));
+                x += width + BUTTON_GAP + gap;
                 buttons.push(button);
             }
-            Err(e) => state::set_status(&format!("Could not create the {} button ({})", label, e)),
+            Err(e) => state::set_status(&format!("Could not create the {} button ({})", word, e)),
         }
     }
 
     // Relaunching elevated needs no words: the UAC shield on a button is the one control
     // every Windows user reads correctly, and it does not have to be translated either. The
-    // shell draws the shield, and a tooltip says what the click will ask for.
+    // shell draws the shield, and the tooltip below says what the click will ask for.
     let mut shield: nwg::Button = Default::default();
     let builder = nwg::Button::builder()
         .text("")
         .parent(window)
         .position((x, 1))
-        .size((SHIELD_W, TOOLBAR_H - 4))
-        .flags(nwg::ButtonFlags::VISIBLE | nwg::ButtonFlags::ICON | nwg::ButtonFlags::TAB_STOP);
+        .size((PICTURE_W, TOOLBAR_H - 4))
+        .flags(picture_flags);
     match builder.build(&mut shield) {
         Ok(()) => {
             let hwnd = shield.handle.hwnd().map(|h| h as *mut c_void);
@@ -471,16 +556,7 @@ fn build_toolbar(window: &nwg::Window) -> (Vec<nwg::Button>, Vec<(cmd::Id, nwg::
                 // No shield to show, so the button has to say it in words instead.
                 shield.set_text("Run as Admin");
             }
-            let mut tip: nwg::Tooltip = Default::default();
-            if nwg::Tooltip::builder()
-                .register(&shield.handle, "Run as Administrator")
-                .build(&mut tip)
-                .is_ok()
-            {
-                // Owned by the tooltip window the builder creates; it lives as long as the
-                // button it is attached to, which is as long as the process.
-                std::mem::forget(tip);
-            }
+            tips.push((shield.handle, "Run as Administrator"));
             handles.push((cmd::RUN_AS_ADMIN, shield.handle));
             buttons.push(shield);
         }
@@ -488,6 +564,38 @@ fn build_toolbar(window: &nwg::Window) -> (Vec<nwg::Button>, Vec<(cmd::Id, nwg::
             "Could not create the Administrator button ({})",
             e
         )),
+    }
+
+    // One tooltip window for the strip, holding every button's words. That is what comctl32
+    // expects - a tooltip control is a container of tips, not a tip - and it means the buttons
+    // above have one thing to outlive rather than nine.
+    let mut tooltip: nwg::Tooltip = Default::default();
+    let mut builder = nwg::Tooltip::builder();
+    for (handle, tip) in &tips {
+        builder = builder.register(handle, tip);
+    }
+    if builder.build(&mut tooltip).is_ok() {
+        if state::debug_enabled() {
+            // A tip that was never registered and a button that was never given one look exactly
+            // the same from outside, and the control is the only place the difference is kept - it
+            // cannot be read from another process, because the structure that describes a tool
+            // carries a pointer to its own text. So `PS7ISE_DEBUG=1` says here how many words
+            // comctl32 was given and reads two of them back.
+            let first = tips.first().map(|(handle, _)| tooltip.text(handle, None));
+            let last = tips.last().map(|(handle, _)| tooltip.text(handle, None));
+            state::log_line(&format!(
+                "toolbar: {} of {} buttons have a tooltip (first {:?}, last {:?})",
+                tooltip.count(),
+                tips.len(),
+                first,
+                last
+            ));
+        }
+        // Owned by the tooltip window the builder creates; it lives as long as the buttons it is
+        // attached to, which is as long as the process.
+        std::mem::forget(tooltip);
+    } else if state::debug_enabled() {
+        state::log_line("toolbar: the tooltip control could not be created");
     }
 
     (buttons, handles)

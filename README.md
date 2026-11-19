@@ -14,7 +14,9 @@ completion from the shell's own `TabExpansion2`.
 The window is the original ISE arrangement: menu bar, toolbar, a tabbed script pane on
 top, the console pane below it, the Commands column down the right-hand side, and a status bar
 showing the current location. The panes and the right-hand column resize with the window to
-make the most of the screen.
+make the most of the screen. The toolbar says what its buttons do with pictures, the way the
+original does, and the words for each one are in a tooltip that also names the key which does
+the same thing.
 
 ## Install
 
@@ -237,6 +239,13 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 MIT.
 
 ## Changelog
+
+### 1.2.0
+- The toolbar carries pictures instead of words, like the original ISE: New, Open, Save, Run
+  Script, Run Selection, Stop, Clear Command Pane, Help, and the Administrator shield.
+- Every toolbar button has a tooltip naming the command and the key that does the same thing.
+- The pictures are drawn when the window is built, so the build still needs no image files, no
+  icon resources and no extra crates. A machine without GDI+ gets the words back.
 
 ### 1.1.0
 - The GUI follows the OS theme, including Dark mode.
