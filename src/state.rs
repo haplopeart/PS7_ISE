@@ -69,6 +69,8 @@ pub mod cmd {
     pub const CLEAR_CONSOLE: u32 = 30;
     pub const TOGGLE_SCRIPT_PANE: u32 = 31;
     pub const TOGGLE_CONSOLE_PANE: u32 = 32;
+    pub const TOGGLE_COMMANDS: u32 = 33;
+    pub const REFRESH_COMMANDS: u32 = 34;
 
     pub const HELP: u32 = 40;
     pub const ABOUT: u32 = 41;
@@ -130,6 +132,15 @@ pub struct AppState {
     pub split: f32,
     pub show_script: bool,
     pub show_console: bool,
+    /// The Commands column down the right-hand side, like the original ISE's. Shown from the
+    /// start: it is what the pane is for, and hiding it by default would leave the feature
+    /// undiscoverable.
+    pub show_commands: bool,
+    /// What the Commands column knows, and the controls that show it.
+    pub commands: crate::panel::Commands,
+    /// Held so the font outlives the controls it was given to; nothing reads it back.
+    #[allow(dead_code)]
+    pub panel_font: Option<nwg::Font>,
 
     pub engine: Option<Engine>,
     pub docs: Vec<Doc>,
@@ -405,14 +416,25 @@ pub fn pump_engine() {
         }
         sync_console();
         if debug_enabled() {
+            // The kinds are what tells a phantom prompt apart from a real one: a prompt the
+            // shell did not mean to print arrives next to something that grew the input line.
+            let kinds: Vec<String> = events
+                .iter()
+                .map(|event| format!("{:?}({})", event.kind, event.text.chars().count()))
+                .collect();
             log_line(&format!(
-                "pump: applied {} events, buffer len {} prompt_start {}",
+                "pump: {} [{}] buffer {} prompt_start {}",
                 events.len(),
+                kinds.join(" "),
                 console_len(),
                 read(|s| s.prompt_start).unwrap_or(-1)
             ));
         }
     }
+
+    // The Commands column reads its answers here too: they arrive on the engine's reader
+    // thread, and a list of four thousand names cannot be applied to a window from there.
+    crate::panel::pump();
 
     let ended = read(|s| s.engine.as_ref().map(|e| e.is_ended()).unwrap_or(false))
         .unwrap_or(false);
@@ -493,8 +515,19 @@ pub fn sync_console() {
 
 fn apply_event(event: &crate::engine::PsEvent) {
     match event.kind {
-        EventKind::Output | EventKind::Progress | EventKind::InputEcho => {
-            console_write(&event.text, event.fg)
+        EventKind::Output | EventKind::InputEcho => console_write(&event.text, event.fg),
+        // A progress record is written for a console that can move the cursor back and draw
+        // the bar over itself. This control has no such thing: a carriage return is a hard
+        // line break, so the bar would leave a line per update and the "bar finished" record
+        // - `\r`, a hundred and twenty spaces, `\r` - would leave two blank lines. Worse, that
+        // text lands on the input line, where the pump reads a line break in it and hands an
+        // empty command to the shell (see the stray-line safety net below): reading the
+        // Commands column, which finishes a pipeline of its own, was repeating the prompt.
+        EventKind::Progress => {
+            let text = progress_text(&event.text);
+            if !text.is_empty() {
+                console_write(&text, event.fg);
+            }
         }
         EventKind::Error => console_write(&event.text, ERROR_FG),
         EventKind::Warning => console_write(&event.text, event.fg),
@@ -543,6 +576,18 @@ fn apply_event(event: &crate::engine::PsEvent) {
         }
         EventKind::Unknown => console_write(&event.text, CONSOLE_FG),
     }
+}
+
+/// A progress record as the console pane can show it: the carriage return the engine puts at
+/// the front to redraw the bar in place is dropped, and the record that only says the bar is
+/// finished - `\r`, spaces, `\r` - gives back nothing, because there is nothing in it worth
+/// keeping and a line of spaces would look like the shell had finished talking.
+fn progress_text(raw: &str) -> String {
+    let trimmed = raw.trim_matches(|c| c == '\r' || c == ' ');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{}\n", trimmed)
 }
 
 fn trim_console() {

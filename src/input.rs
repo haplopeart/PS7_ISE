@@ -58,7 +58,7 @@ fn replace_input(text: &str) {
 
 /// Replaces the UTF-16 code-point range `[start, end)` inside the draft with `text`,
 /// moving the caret to after the inserted text.
-fn replace_range(start: usize, end: usize, text: &str) {
+pub fn replace_range(start: usize, end: usize, text: &str) {
     write(|s| {
         let d = &s.draft;
         let u16_total = d.encode_utf16().count();
@@ -294,7 +294,9 @@ fn copy_selection() {
     write_clipboard(&text);
 }
 
-fn write_clipboard(text: &str) {
+/// Puts text on the clipboard as Unicode text. Also used by the Commands column's Copy
+/// button, which is the one place a command line leaves this program without being run.
+pub fn write_clipboard(text: &str) {
     use std::ffi::c_void;
     #[link(name = "user32")] extern "system" {
         fn OpenClipboard(hwnd: *mut c_void) -> i32;

@@ -7,6 +7,10 @@
 /dist-setup
 /dist-sc
 
+# Scratch engine-only publish, for running engine-protocol-test.ps1 without touching the
+# committed dist\: build.ps1 -SkipFrontEnd -SkipVersionBump -OutDir .engine-test
+/.engine-test
+
 # .NET intermediates; the publish output that matters lives in dist\.
 **/bin/
 **/obj/

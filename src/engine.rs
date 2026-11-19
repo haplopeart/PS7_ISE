@@ -11,6 +11,7 @@
 //! escaped to printable ASCII, which keeps a record on one line no matter what the shell
 //! prints.
 
+use crate::commands::{MetadataReply, MetadataStream};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,10 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(6);
 /// Bound on queued output, so a chatty command cannot eat all the memory.
 const MAX_QUEUED_EVENTS: usize = 50_000;
+/// Bound on command-metadata answers waiting to be read. The panel asks for one thing at a
+/// time, so this only ever holds the answers it had not got to yet - and a Refresh pressed
+/// while a list is still arriving can produce several.
+const MAX_QUEUED_METADATA: usize = 8;
 
 /// What a [`PsEvent`] means to the console pane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,6 +106,12 @@ struct EngineState {
     events: VecDeque<PsEvent>,
     /// Reply to the pending `T` request, if one has arrived.
     completions: Option<Vec<String>>,
+    /// The `M` answer being stitched together as its chunks arrive. Nothing else can do
+    /// this: a command that finishes while a list is being read puts its output between two
+    /// chunks, so the records only make sense to something that remembers the answer so far.
+    metadata: MetadataStream,
+    /// Finished `M` answers, oldest first, waiting for the Commands panel to pick them up.
+    metadata_ready: VecDeque<MetadataReply>,
     /// True once the shell is gone: the input line has to close.
     ended: bool,
     /// True between CommandStarted and CommandFinished.
@@ -244,6 +255,36 @@ impl Engine {
         (0..limit).filter_map(|_| state.events.pop_front()).collect()
     }
 
+    /// Asks for every command the session can see (`M i`). The answer is not waited for: it is
+    /// four thousand names spread over several records, and the UI thread cannot stop for that.
+    pub fn read_commands(&mut self) {
+        self.send("M i\n");
+    }
+
+    /// Asks for the same list with the engine's cache of it thrown away (`M r`). Importing a
+    /// module adds commands to the session, so the panel needs a way to say "look again".
+    pub fn reread_commands(&mut self) {
+        self.send("M r\n");
+    }
+
+    /// Asks for one command's syntax and parameters (`M d <name>`). The name goes out escaped
+    /// because a function can be called almost anything.
+    pub fn read_command(&mut self, name: &str) {
+        self.send(&format!("M d {}\n", encode(name)));
+    }
+
+    /// Takes the command-metadata answers that have arrived, without waiting for one. The
+    /// panel asks on a click and finds the answer on a later tick, which is the only way to
+    /// keep a second-long read from freezing the window.
+    pub fn drain_metadata(&mut self, limit: usize) -> Vec<MetadataReply> {
+        let Ok(mut state) = self.state.0.lock() else {
+            return Vec::new();
+        };
+        (0..limit)
+            .filter_map(|_| state.metadata_ready.pop_front())
+            .collect()
+    }
+
     pub fn is_ended(&self) -> bool {
         self.state.0.lock().map(|s| s.ended).unwrap_or(true)
     }
@@ -300,6 +341,15 @@ impl Engine {
     }
 
     fn send(&self, payload: &str) {
+        if crate::state::debug_enabled() {
+            // Only the verb and the length: a submitted line can hold a password the user
+            // typed at the prompt.
+            crate::state::log_line(&format!(
+                "engine <: {} ({} chars)",
+                payload.split(' ').next().unwrap_or("?"),
+                payload.chars().count()
+            ));
+        }
         let Ok(mut guard) = self.stdin.lock() else { return };
         let Some(stdin) = guard.as_mut() else { return };
         // A broken pipe just means the engine already went away.
@@ -379,11 +429,34 @@ fn read_loop(stdout: std::process::ChildStdout, state: Arc<(Mutex<EngineState>, 
                 );
             }
 
+            Some("M") => {
+                // Six fields, not five. This payload is the sixth and, unlike every other
+                // text field on the wire, it contains spaces of its own that the engine's
+                // escaping leaves alone - splitting it with the shared five would cut the
+                // answer off at the first one. So it is split again, with room for it.
+                let mut meta = record.splitn(6, ' ');
+                meta.next();
+                let kind = meta.next().unwrap_or("");
+                let part = meta.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                let of = meta.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                let reply = meta.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                let payload = meta.next().unwrap_or("");
+
+                if let Some(done) = guard.metadata.feed(kind, part, of, reply, &decode(payload)) {
+                    if guard.metadata_ready.len() >= MAX_QUEUED_METADATA {
+                        guard.metadata_ready.pop_front();
+                    }
+                    guard.metadata_ready.push_back(done);
+                }
+            }
+
             Some("Q") => {
                 guard.exit_code = fields.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
                 guard.ended = true;
                 guard.busy = false;
                 guard.input_requested = false;
+                // Whatever list was on its way is not coming.
+                guard.metadata.reset();
             }
 
             // Anything else is not ours, and a foreign line must not end the session.
@@ -410,6 +483,9 @@ fn read_loop(stdout: std::process::ChildStdout, state: Arc<(Mutex<EngineState>, 
         guard.ended = true;
         guard.busy = false;
         guard.input_requested = false;
+        // A command list that was half way here is never going to be finished, and the panel
+        // has to be able to tell that case apart from one it is still waiting for.
+        guard.metadata.reset();
     }
     state.1.notify_all();
 }

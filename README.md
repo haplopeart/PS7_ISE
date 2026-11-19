@@ -11,7 +11,8 @@ history, `Ctrl+C`, and Tab completion from the shell's own `TabExpansion2`.
 ![layout](docs/layout.png)
 
 The window is the original ISE arrangement: menu bar, toolbar, a tabbed script pane on
-top, the console pane below it, and a status bar showing the current location.
+top, the console pane below it, the Commands column down the right-hand side, and a status bar
+showing the current location.
 
 ## Install
 
@@ -52,7 +53,7 @@ anything:
 .\build.ps1                 # engine + front-end into .\dist
 .\build.ps1 -SkipEngine     # front-end only (leaves the published engine alone)
 .\build.ps1 -SkipFrontEnd   # engine only (keeps the PS7_ISE.exe already in dist)
-.\build.ps1 -SelfContained  # ship the .NET runtime in dist (about 200 MB)
+.\build.ps1 -SelfContained  # ship the .NET runtime in dist (about 114 MB)
 ```
 
 Then run `dist\PS7_ISE.exe`. The engine files have to stay next to the exe: PowerShell
@@ -101,18 +102,57 @@ framework.
 | `F1` | PowerShell 7 help |
 | `Ctrl+N` `Ctrl+O` `Ctrl+S` `Ctrl+Shift+S` `Ctrl+W` | new, open, save, save as, close the script tab |
 
+## Commands pane
+
+The column down the right-hand side is the original ISE's Commands add-on: it lists what the
+session can run and builds a command line out of the ones you tick.
+
+| Part | What it does |
+| --- | --- |
+| Module | Filters the list to one module. `(All modules)` is the whole session, `(no module)` the commands that own no module - the drive roots like `A:` and the functions the session defines itself |
+| Find | Substring match on the name, applied as you type. The selection follows the command, so the list can be rebuilt on every keystroke without losing where you were |
+| Command list | The cmdlets and functions the session knows, alphabetical. Double-click a name to insert it where the caret is |
+| Syntax | Where the command came from, what it is for, and how it is called - one line per parameter set |
+| Parameter list | `[x]` against the parameters to use, and `*` against one the command cannot be run without. The parameters every cmdlet has (`-Verbose`, `-ErrorAction`, ...) are sorted to the bottom under a divider, because the original ISE kept them on a tab of their own |
+| `Use`, and the box beside it | Apply to the parameter the list has selected: tick it to put it on the command line, type its value in the box. A switch has no value, so the box is greyed out for one |
+| **Insert** | Writes the command line at the caret - the console prompt, or the script pane when that is what has the focus |
+| **Run** | Submits it now |
+| **Copy** | Puts it on the clipboard |
+
+Parameters are always written by name, never positionally, so a command line that has been
+through the script pane still says which value belongs to which parameter.
+
+View > **Show Commands Column** gives the width back to the two panes. View > **Refresh
+Command List** reads the session again instead of answering from what the pane already has,
+which is how the commands of a module you imported since opening the app make their way into
+the list.
+
+Selecting a command imports its module, exactly as picking one in the original ISE did. That
+is the only way to get a command's parameters at all: the list itself is read without
+importing anything, which is why four thousand commands arrive in about a second, and a
+command from a module nobody has loaded is a name with nothing else to say about itself.
+
 ## How it works
 
 ```
 PS7_ISE.exe  (Rust, native-windows-gui)
-    |  writes:  L <line>  T <caret> <text>  S  X
+    |  writes:  L <line>  T <caret> <text>  S  X   M i   M r   M d <name>
     |  reads:   E <kind> <fg> <bg> <text>   C <count> <text>   Q <code>
+    |           M <kind> <part> <of> <reply> <payload>
     v
 PowerShellEngineHost.exe  (.NET, Microsoft.PowerShell.SDK)
-    Program.cs   the protocol
-    ISEHost.cs   PSHost + PSHostRawUserInterface
-    Session.cs   the runspace, the prompt loop, TabExpansion2
+    Program.cs          the protocol
+    ISEHost.cs          PSHost + PSHostRawUserInterface
+    Session.cs          the runspace, the prompt loop, TabExpansion2
+    CommandMetadata.cs  the command list, and one command's parameters
 ```
+
+`M` is the metadata verb: `i` for the list of commands, `d <name>` for one command, `r` to
+throw the cached list away. An answer arrives in chunks of 48 KB that are numbered, so a
+command finishing in the middle of a list cannot splice its output into the middle of a
+reply. It is answered only while the shell is idle - while a command is running the engine
+says so in one line, and the pane asks again a moment later rather than counting the refusal
+as a failure.
 
 One record per line, with text escaped to printable ASCII (`\\`, `\uXXXX`), so nothing a
 command prints can break the framing. The Rust side keeps the console document in memory -
@@ -144,6 +184,8 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 | `src\state.rs` | application state, console document and colour runs, engine pump |
 | `src\console.rs` | the console rich edit control: text, selection, colours, caret |
 | `src\input.rs` | console keystrokes, history, completion insertion, clipboard |
+| `src\commands.rs` | the `M` answers: reassembly, parsing, what the Commands pane knows |
+| `src\panel.rs` | the Commands column: its controls, its filters, Insert / Run / Copy |
 | `src\docs.rs` | script tabs, file I/O, "run this in the console" |
 | `src\highlight.rs` | PowerShell syntax colouring for the script pane |
 | `src\engine.rs` | the child process and its record protocol |
@@ -161,12 +203,26 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 - The console scroll-back is trimmed once it passes about 400 000 characters, and every
   refresh rewrites the document, which a normal session never notices but a command
   printing hundreds of megabytes will.
+- A `Write-Progress` bar cannot redraw itself in a text document, so each update prints a line
+  of its own. The record whose only job is to erase the bar prints nothing at all, which is
+  also what stops a finished command from repeating the prompt.
 - Windows PowerShell 5.1 is deliberately not supported.
 - `Start-Job` needs a self-contained build. A background job is a second PowerShell started
   at `$PSHome\pwsh.exe`, `pwsh.exe` looks for its runtime only in its own folder, and
   `$PSHome` is read-only, so the runtime has to be beside the engine. The release installer
   ships such a build; `.\build.ps1` without `-SelfContained` prints a notice at startup and
   leaves jobs unavailable.
+- The Commands pane reads metadata only while the shell is idle: the runspace answers one
+  thing at a time, so asking about commands while a command is running gets a one-line
+  refusal, and the pane waits and asks again rather than treating that as a failure.
+- The command list is a snapshot taken when the pane is opened, so a module imported later
+  stays out of it until View > Refresh Command List.
+- Help text is only there when the module's help is installed. Without it a parameter still
+  reports its type, whether it is required, its position and whether it is a switch, but no
+  description, and the summary line is the one PowerShell makes up from the syntax.
+- For a function, the syntax area shows what `Get-Command` calls its definition, which for a
+  function is its body. For a cmdlet the same field holds its parameter sets, which is what the
+  area is laid out for.
 
 ## License
 

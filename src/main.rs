@@ -11,6 +11,7 @@
 
 extern crate native_windows_gui as nwg;
 
+mod commands;
 mod console;
 mod docs;
 mod engine;
@@ -18,6 +19,7 @@ mod gutter;
 mod highlight;
 mod icons;
 mod input;
+mod panel;
 mod state;
 
 use console::ConsoleView;
@@ -219,6 +221,25 @@ fn build_ui() -> *mut AppState {
         state::set_status("Could not create the line-number gutter");
     }
 
+    // The Commands column down the right-hand side, like the original ISE's. It gets a font of
+    // its own at 9 point: the column has to fit a parameter row (`[x] Verbose
+    // <SwitchParameter>`) and a long command name, and the panes' 11 point would leave it about
+    // a dozen characters to do that in.
+    let mut panel_font: nwg::Font = Default::default();
+    if nwg::Font::builder()
+        .family("Consolas")
+        .size(9)
+        .build(&mut panel_font)
+        .is_err()
+    {
+        nwg::Font::builder()
+            .family("Courier New")
+            .size(9)
+            .build(&mut panel_font)
+            .ok();
+    }
+    let commands = panel::create(&window, Some(&panel_font));
+
     // Shell output is polled on this timer, which also starts the engine once the
     // window has been shown.
     let mut timer: nwg::Timer = Default::default();
@@ -261,6 +282,9 @@ fn build_ui() -> *mut AppState {
         split: 0.5,
         show_script: true,
         show_console: true,
+        show_commands: true,
+        commands,
+        panel_font: Some(panel_font),
         engine: None,
         docs: vec![state::Doc {
             title: "Untitled 1".to_string(),
@@ -347,6 +371,10 @@ fn build_menus(
     add(3, "Show/Hide &Script Pane", cmd::TOGGLE_SCRIPT_PANE);
     add(3, "Show/Hide &Command Pane", cmd::TOGGLE_CONSOLE_PANE);
     add(3, "C&lear Command Pane", cmd::CLEAR_CONSOLE);
+    // "Commands", plural, and a different verb: the item above called the console the command
+    // pane, and two "Show/Hide Command..." lines in one menu would be unreadable.
+    add(3, "Sho&w Commands Column", cmd::TOGGLE_COMMANDS);
+    add(3, "&Refresh Command List", cmd::REFRESH_COMMANDS);
 
     add(4, "PowerShell 7 &Help\tF1", cmd::HELP);
     add(4, "&About PowerShell ISE", cmd::ABOUT);
@@ -435,7 +463,14 @@ fn layout() {
             return;
         };
         let (width, height) = console::client_size(hwnd as *mut c_void);
-        let tabs_width = (width - 2 * BORDER).max(10) as u32;
+        // The Commands column takes its width off the right, and both panes give it up: the
+        // original ISE docks it the same way rather than floating it over the panes.
+        let panel_width = if s.show_commands {
+            panel::WIDTH + GAP
+        } else {
+            0
+        };
+        let tabs_width = (width - 2 * BORDER - panel_width).max(10) as u32;
         s.tabs.set_position(BORDER, TOOLBAR_H);
         s.tabs.set_size(tabs_width, TAB_STRIP_H as u32);
 
@@ -484,6 +519,18 @@ fn layout() {
                 &[(width - CARET_W - BORDER).max(10), -1],
             );
         }
+    });
+
+    // The column itself is placed through a write: laying it out means taking the controls
+    // mutably, which the read above cannot hand out.
+    state::write(|s| {
+        let Some(hwnd) = s.window.handle.hwnd() else {
+            return;
+        };
+        let (width, height) = console::client_size(hwnd as *mut c_void);
+        let x = (width - BORDER - panel::WIDTH).max(BORDER);
+        let height = (height - TOOLBAR_H - STATUS_H - GAP).max(120);
+        panel::layout(&mut s.commands, x, TOOLBAR_H, height, s.show_commands);
     });
 }
 
@@ -565,9 +612,18 @@ fn dispatch(evt: E, _data: nwg::EventData, handle: nwg::ControlHandle) {
         }
         E::OnTimerTick => on_tick(),
         E::OnMenuItemSelected | E::OnButtonClick => {
-            if let Some(id) = state::command_for(&handle) {
-                run_command(id);
+            // A click from a control that is not in the menu table came out of the Commands
+            // column: its buttons and its check box are not menu commands.
+            match state::command_for(&handle) {
+                Some(id) => run_command(id),
+                None => {
+                    panel::on_event(evt, &handle);
+                }
             }
+        }
+        // The Commands column's dropdown and its two lists.
+        E::OnComboxBoxSelection | E::OnListBoxSelect | E::OnListBoxDoubleClick => {
+            panel::on_event(evt, &handle);
         }
         E::TabsContainerChanged => {
             if state::is(&handle, |s| s.tabs.handle) {
@@ -579,6 +635,9 @@ fn dispatch(evt: E, _data: nwg::EventData, handle: nwg::ControlHandle) {
             if state::is(&handle, |s| s.editor.handle) {
                 docs::repaint_editor();
             }
+            // The column's Find box and its parameter value box are edit controls too, and
+            // both filter or remember as they are typed.
+            panel::on_event(evt, &handle);
         }
         _ => {}
     }
@@ -677,6 +736,8 @@ fn run_command(id: u32) {
         CLEAR_CONSOLE => input::clear_console(),
         TOGGLE_SCRIPT_PANE => toggle_panes(true),
         TOGGLE_CONSOLE_PANE => toggle_panes(false),
+        TOGGLE_COMMANDS => panel::toggle(),
+        REFRESH_COMMANDS => panel::refresh(),
         HELP => show_help(),
         ABOUT => show_about(),
         RUN_AS_ADMIN => run_as_admin(),
