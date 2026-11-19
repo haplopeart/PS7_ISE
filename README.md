@@ -240,6 +240,10 @@ MIT.
 
 ## Changelog
 
+### 1.2.1
+- `PS7ISE-Setup.exe` carries a version resource, so its Properties sheet says which build it is
+  instead of leaving File version and Product version blank. Nothing else changes.
+
 ### 1.2.0
 - The toolbar carries pictures instead of words, like the original ISE: New, Open, Save, Run
   Script, Run Selection, Stop, Clear Command Pane, Help, and the Administrator shield.

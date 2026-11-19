@@ -23,8 +23,21 @@ RequestExecutionLevel admin
 ; stay in sync with the front end; a mismatch here is cosmetic only and never breaks
 ; install or uninstall.
 !ifndef VERSION
-  !define VERSION "1.2.0"
+  !define VERSION "1.2.1"
 !endif
+
+; The installer's own version resource, so Explorer's Properties sheet on PS7ISE-Setup.exe says
+; the same number as the title bar of the program inside it rather than nothing at all. NSIS
+; insists on four numbers for VIProductVersion, unlike the three the front end carries, so the
+; fourth is written down rather than guessed at by the tool.
+!define FILEVERSION "${VERSION}.0"
+VIProductVersion "${FILEVERSION}"
+VIAddVersionKey /LANG=1033 "CompanyName" "HCW"
+VIAddVersionKey /LANG=1033 "FileDescription" "PS7 ISE installer"
+VIAddVersionKey /LANG=1033 "FileVersion" "${FILEVERSION}"
+VIAddVersionKey /LANG=1033 "ProductName" "PS7 ISE"
+VIAddVersionKey /LANG=1033 "ProductVersion" "${VERSION}"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "MIT"
 
 ; Interface
 !define MUI_ABORTWARNING
