@@ -23,7 +23,7 @@ RequestExecutionLevel admin
 ; stay in sync with the front end; a mismatch here is cosmetic only and never breaks
 ; install or uninstall.
 !ifndef VERSION
-  !define VERSION "1.2.1"
+  !define VERSION "1.2.2"
 !endif
 
 ; The installer's own version resource, so Explorer's Properties sheet on PS7ISE-Setup.exe says
