@@ -237,7 +237,8 @@ if (-not $idx) {
     Assert ($summed -eq $idx.text.Length) 'reassembly loses nothing across chunk boundaries' ($summed.ToString() + ' vs ' + $idx.text.Length.ToString())
 
     $rows = @($idx.text -split $SEP_ROW | Where-Object { $_ -ne '' })
-    Assert ($rows.Count -ge 4000) 'index lists the expected number of commands' ('rows=' + $rows.Count)
+    $minRows = if ($IsWindows) { 4000 } else { 200 }
+    Assert ($rows.Count -ge $minRows) 'index lists the expected number of commands' ('rows=' + $rows.Count + ' min=' + $minRows)
 
     $bad = @($rows | Where-Object { @($_ -split $SEP_FIELD).Length -ne 3 })
     Assert ($bad.Count -eq 0) 'every index row has name, module and parameters' ('bad=' + $bad.Count + ' first=' + ($bad | Select-Object -First 1))
@@ -365,22 +366,30 @@ else {
     Assert ((PField $m 'Path' 4) -eq '0') '-Path is positional 0' ('got=' + (PField $m 'Path' 4))
 }
 
-Send 'M d Get-Service'
-$gs = Read-Metadata 'd' 90000
-if (-not $gs) { Fail 'detail for Get-Service arrived' 'timed out' }
+# Cross-platform polarity checks: Get-Service parameter shape differs across OSes,
+# so use core cmdlets with stable metadata on Windows/macOS/Linux.
+Send 'M d Get-Command'
+$gc = Read-Metadata 'd' 90000
+if (-not $gc) { Fail 'detail for Get-Command arrived' 'timed out' }
 else {
-    $m2 = Get-ParamMap $gs
-    # Polarity, taken from the command's own syntax line:
-    #   Get-Service [[-Name] <string[]>] [-DependentServices] ...
-    #   Get-Service -DisplayName <string[]> ...
-    # so -DisplayName is mandatory and -Name is not, and -DependentServices is a switch.
-    Assert ($m2.ContainsKey('DependentServices')) 'detail includes -DependentServices' ('keys=' + ($m2.Keys -join ','))
-    Assert ((PField $m2 'DependentServices' 5) -eq '1') 'Get-Service -DependentServices is a switch' ('got=' + (PField $m2 'DependentServices' 5))
-    Assert ((PField $m2 'Name' 5) -eq '0') 'Get-Service -Name is not a switch' ('got=' + (PField $m2 'Name' 5))
-    Assert ((PField $m2 'DisplayName' 3) -eq '1') 'Get-Service -DisplayName is mandatory (mandatory is not a constant)' ('got=' + (PField $m2 'DisplayName' 3))
-    Assert ((PField $m2 'Name' 3) -eq '0') 'Get-Service -Name is not mandatory' ('got=' + (PField $m2 'Name' 3))
+    $m2 = Get-ParamMap $gc
+    Assert ($m2.ContainsKey('Syntax')) 'detail includes -Syntax' ('keys=' + ($m2.Keys -join ','))
+    Assert ((PField $m2 'Syntax' 5) -eq '1') 'Get-Command -Syntax is a switch' ('got=' + (PField $m2 'Syntax' 5))
+    Assert ((PField $m2 'Name' 5) -eq '0') 'Get-Command -Name is not a switch' ('got=' + (PField $m2 'Name' 5))
+    Assert ((PField $m2 'Name' 3) -eq '0') 'Get-Command -Name is not mandatory' ('got=' + (PField $m2 'Name' 3))
     Note ('-Name mandatory=' + (PField $m2 'Name' 3) + ' position=' + (PField $m2 'Name' 4))
-    Note ('-DisplayName mandatory=' + (PField $m2 'DisplayName' 3) + ' position=' + (PField $m2 'DisplayName' 4))
+    Note ('-Syntax switch=' + (PField $m2 'Syntax' 5))
+}
+
+Send 'M d Get-Content'
+$gct = Read-Metadata 'd' 90000
+if (-not $gct) { Fail 'detail for Get-Content arrived' 'timed out' }
+else {
+    $m3 = Get-ParamMap $gct
+    Assert ($m3.ContainsKey('Path')) 'detail includes -Path' ('keys=' + ($m3.Keys -join ','))
+    Assert ((PField $m3 'Path' 3) -eq '1') 'Get-Content -Path is mandatory (mandatory is not a constant)' ('got=' + (PField $m3 'Path' 3))
+    Assert ((PField $m3 'Path' 5) -eq '0') 'Get-Content -Path is not a switch' ('got=' + (PField $m3 'Path' 5))
+    Note ('-Path mandatory=' + (PField $m3 'Path' 3) + ' position=' + (PField $m3 'Path' 4))
 }
 
 # An alias names a command rather than being one, so `cd` has to be described by
@@ -486,14 +495,15 @@ if ($prompt) { Note ('prompt: ' + $prompt.TrimEnd()) }
 $soakIdx = Request-Index 45000
 $soakRows = 0
 if ($soakIdx -and $soakIdx.kind -eq 'i') { $soakRows = @($soakIdx.text -split $SEP_ROW | Where-Object { $_ -ne '' }).Count }
-if ($soakRows -lt 4000) {
+$minRows = if ($IsWindows) { 4000 } else { 200 }
+if ($soakRows -lt $minRows) {
     # Do not guess at this one: say what the engine actually returned and whether it is alive.
     $got = '<no reply>'
     $said = ''
     if ($soakIdx) { $got = $soakIdx.kind; $said = $soakIdx.text }
     Note ('diagnosis: engine alive=' + (-not $p.HasExited) + ', kind=' + $got + ', says=' + $said)
 }
-Assert ($soakRows -ge 4000) 'the index is still complete after the soak' ('rows=' + $soakRows)
+Assert ($soakRows -ge $minRows) 'the index is still complete after the soak' ('rows=' + $soakRows + ' min=' + $minRows)
 
 # Which way the engine leans when asked mid-command decides what the panel has to say, so
 # report it rather than assert it: a busy answer means the panel shows a wait, a real reply

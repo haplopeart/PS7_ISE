@@ -21,3 +21,9 @@
 *.user
 Thumbs.db
 Desktop.ini
+# macOS noise
+.DS_Store
+**/.DS_Store
+
+# Cross-platform prototype build output
+/cross-platform-ui/target/
