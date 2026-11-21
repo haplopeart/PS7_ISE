@@ -18,6 +18,20 @@ make the most of the screen. The toolbar says what its buttons do with pictures,
 original does, and the words for each one are in a tooltip that also names the key which does
 the same thing.
 
+## Platform support
+
+**A macOS port and a Linux port are underway right now, as a parallel effort.**
+
+The engine is the portable half: it is a .NET process hosting
+[`Microsoft.PowerShell.SDK`](https://learn.microsoft.com/powershell/scripting/dev-cross-plat/powershell-scripting),
+and PowerShell 7 itself runs on macOS and Linux, so the shell, the runspace and the record
+protocol carry over as they are. The front-end is the work: today it is Rust over native Win32
+controls, and a port has to replace each of those - the rich edit console, the menu and toolbar,
+the tabbed script pane - with something the target platform provides.
+
+Nothing to download from this repository for either port yet. The builds here, including
+`PS7ISE-Setup.exe` and the committed `dist\`, remain **Windows x64 only**.
+
 ## Install
 
 Run `PS7ISE-Setup.exe` from the
@@ -206,7 +220,8 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 
 ## Known limitations
 
-- Windows x64 only.
+- Windows x64 only. The macOS and Linux ports are in development in parallel - see
+  [Platform support](#platform-support).
 - No script debugger: no breakpoints, no stepping, no variable inspection. The Debug menu
   holds only the three commands it can really perform - Run Script, Run Selection, Stop Run.
 - Panes split at a fixed ratio and there is no draggable splitter bar; View > Show/Hide
