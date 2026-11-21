@@ -187,11 +187,8 @@ public sealed class Session
         EnsureModulePath();
 
         var iss = InitialSessionState.CreateDefault2();
-        if (OperatingSystem.IsWindows())
-        {
-            iss.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
-            iss.ApartmentState = ApartmentState.STA;
-        }
+        iss.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Bypass;
+        iss.ApartmentState = ApartmentState.STA;
 
         _runspace = RunspaceFactory.CreateRunspace(_host = new ISEHost(this), iss);
         _runspace.Open();
