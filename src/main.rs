@@ -742,6 +742,17 @@ fn bind_handlers() {
                         None
                     }
                 }
+                console::WM_RBUTTONDOWN => {
+                    // Right-click: copy any selection to the clipboard.
+                    // copy_selection() is a no-op when there is no selection.
+                    input::copy_selection();
+                    Some(0)
+                }
+                console::WM_CONTEXTMENU => {
+                    // Right-click context: copy any selection to the clipboard.
+                    input::copy_selection();
+                    Some(0)
+                }
                 _ => None,
             }
         })

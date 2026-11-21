@@ -92,6 +92,8 @@ pub fn send_message(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -
 pub const WM_CUT: u32 = 0x0300;
 pub const WM_COPY: u32 = 0x0301;
 pub const WM_PASTE: u32 = 0x0302;
+pub const WM_RBUTTONDOWN: u32 = 0x0204;
+pub const WM_CONTEXTMENU: u32 = 0x007B;
 
 /// Size of a window's client area, in pixels.
 pub fn client_size(hwnd: *mut c_void) -> (i32, i32) {

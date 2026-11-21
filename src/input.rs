@@ -278,7 +278,7 @@ pub fn control_c() {
     }
 }
 
-fn copy_selection() {
+pub fn copy_selection() {
     let text = read(|s| {
         let Some(view) = s.console_view.as_ref() else { return String::new(); };
         let sel = view.selection();
