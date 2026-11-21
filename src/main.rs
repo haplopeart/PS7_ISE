@@ -777,7 +777,18 @@ fn dispatch(evt: E, _data: nwg::EventData, handle: nwg::ControlHandle) {
                 nwg::stop_thread_dispatch();
             }
         }
-        E::OnResize => {
+        // Three ways the frame changes size, and only one of them is a resize. The window
+        // procedure sends WM_SIZE with SIZE_MAXIMIZED when the maximize button is pressed, and
+        // that is OnWindowMaximize rather than OnResize; with SIZE_MINIMIZED it is
+        // OnWindowMinimize. A drag of the border, by contrast, is a stream of OnResize messages
+        // followed by OnResizeEnd. So the two arms below are what make the maximize button
+        // actually resize the panes, which a drag already does correctly.
+        E::OnResize | E::OnResizeEnd => {
+            if state::is(&handle, |s| s.window.handle) {
+                layout();
+            }
+        }
+        E::OnWindowMaximize => {
             if state::is(&handle, |s| s.window.handle) {
                 layout();
             }
