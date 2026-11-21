@@ -13,6 +13,7 @@ extern crate native_windows_gui as nwg;
 
 mod commands;
 mod console;
+mod debug;
 mod docs;
 mod engine;
 mod gutter;

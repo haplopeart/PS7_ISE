@@ -12,6 +12,7 @@
 //! prints.
 
 use crate::commands::{MetadataReply, MetadataStream};
+use crate::debug::{DebugEvent, DebugReply, DebugStream, StopInfo};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,14 @@ const MAX_QUEUED_EVENTS: usize = 50_000;
 /// time, so this only ever holds the answers it had not got to yet - and a Refresh pressed
 /// while a list is still arriving can produce several.
 const MAX_QUEUED_METADATA: usize = 8;
+/// Bound on queued debugger answers. The debugger asks for one thing per click - a list, a
+/// frame's variables, one expression - so a backlog this long means the window stopped being
+/// painted rather than that the user is reading fast.
+const MAX_QUEUED_DEBUG: usize = 8;
+/// Bound on stop/resume notifications waiting to be painted. They are the one piece of
+/// debugger state that must not be dropped: a stop the window never saw leaves the panes
+/// showing a scope that no longer exists.
+const MAX_QUEUED_DEBUG_EVENTS: usize = 32;
 
 /// What a [`PsEvent`] means to the console pane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -117,6 +126,17 @@ struct EngineState {
     metadata: MetadataStream,
     /// Finished `M` answers, oldest first, waiting for the Commands panel to pick them up.
     metadata_ready: VecDeque<MetadataReply>,
+    /// The `D` answer being stitched together, kept apart from `metadata` on purpose: a
+    /// variables list read while the command index is still arriving puts its parts between
+    /// the index's parts, and one buffer holding both would corrupt both.
+    debug: DebugStream,
+    /// Finished `D` answers, oldest first, waiting for the debugger panes.
+    debug_ready: VecDeque<DebugReply>,
+    /// Stop and resume notifications, oldest first, in the order the engine sent them.
+    debug_events: VecDeque<DebugEvent>,
+    /// True between `D s` and the `D r` that ends it. Everything the debugger can be asked
+    /// to do is only meaningful in that window, so the menu keys its items off this.
+    stopped: bool,
     /// True once the shell is gone: the input line has to close.
     ended: bool,
     /// True between CommandStarted and CommandFinished.
@@ -290,6 +310,52 @@ impl Engine {
             .collect()
     }
 
+    /// Sends one debugger request (`D <verb> [argument]`). Nothing is waited for, and nothing
+    /// can be: the engine only answers while execution is held at a stop, and the answer
+    /// arrives in chunks over the following ticks like a command index.
+    ///
+    /// The argument is escaped like any other text field, which is what lets a script path
+    /// with spaces in it survive the engine splitting the record back apart.
+    pub fn debug_request(&mut self, verb: &str, argument: &str) {
+        if crate::state::debug_enabled() {
+            crate::state::log_line(&format!("engine <: D {} <{} chars>", verb, argument.chars().count()));
+        }
+        if argument.is_empty() {
+            self.send(&format!("D {}\n", verb));
+        } else {
+            self.send(&format!("D {} {}\n", verb, encode(argument)));
+        }
+    }
+
+    /// Asks the debugger to continue (`c`), step into (`i`), step over (`o`), step out
+    /// (`u`), or abandon the script (`q`). This is the one debugger call the engine accepts
+    /// without a stop outstanding being useful: an unmatched resume is simply ignored.
+    pub fn debug_resume(&mut self, verb: &str) {
+        self.debug_request(verb, "");
+    }
+
+    /// Takes the debugger answers that have arrived, without waiting for one.
+    pub fn drain_debug(&mut self, limit: usize) -> Vec<DebugReply> {
+        let Ok(mut state) = self.state.0.lock() else {
+            return Vec::new();
+        };
+        (0..limit).filter_map(|_| state.debug_ready.pop_front()).collect()
+    }
+
+    /// Takes the stop and resume notifications, oldest first, so the panes can follow the
+    /// stop as it moves rather than guessing from whatever they last asked for.
+    pub fn drain_debug_events(&mut self, limit: usize) -> Vec<DebugEvent> {
+        let Ok(mut state) = self.state.0.lock() else {
+            return Vec::new();
+        };
+        (0..limit).filter_map(|_| state.debug_events.pop_front()).collect()
+    }
+
+    /// True while execution is held at a stop.
+    pub fn is_stopped(&self) -> bool {
+        self.state.0.lock().map(|s| s.stopped).unwrap_or(false)
+    }
+
     pub fn is_ended(&self) -> bool {
         self.state.0.lock().map(|s| s.ended).unwrap_or(true)
     }
@@ -455,6 +521,56 @@ fn read_loop(stdout: std::process::ChildStdout, state: Arc<(Mutex<EngineState>, 
                 }
             }
 
+            Some("D") => {
+                // Six fields, for the reason the metadata arm gives: the payload has spaces of
+                // its own that the engine's escaping leaves alone. Two of its shapes are not
+                // chunked at all, because they are a line rather than an answer.
+                let mut d = record.splitn(6, ' ');
+                d.next();
+                match d.next().unwrap_or("") {
+                    "r" => {
+                        guard.stopped = false;
+                        // Whatever was half way here belongs to a scope that has already
+                        // moved on, and painting it would show the user variables from a
+                        // frame that no longer exists.
+                        guard.debug.reset();
+                        if guard.debug_events.len() < MAX_QUEUED_DEBUG_EVENTS {
+                            guard.debug_events.push_back(DebugEvent::Resumed);
+                        }
+                    }
+
+                    "s" => {
+                        let reason = d.next().unwrap_or("").to_string();
+                        let line = d.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                        let column = d.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                        let script = decode(d.next().unwrap_or(""));
+                        guard.stopped = true;
+                        if guard.debug_events.len() < MAX_QUEUED_DEBUG_EVENTS {
+                            guard.debug_events.push_back(DebugEvent::Stopped(StopInfo {
+                                reason,
+                                line,
+                                column,
+                                script,
+                            }));
+                        }
+                    }
+
+                    kind => {
+                        let part = d.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                        let of = d.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                        let reply = d.next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                        let payload = d.next().unwrap_or("");
+
+                        if let Some(done) = guard.debug.feed(kind, part, of, reply, &decode(payload)) {
+                            if guard.debug_ready.len() >= MAX_QUEUED_DEBUG {
+                                guard.debug_ready.pop_front();
+                            }
+                            guard.debug_ready.push_back(done);
+                        }
+                    }
+                }
+            }
+
             Some("Q") => {
                 guard.exit_code = fields.next().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
                 guard.ended = true;
@@ -462,6 +578,8 @@ fn read_loop(stdout: std::process::ChildStdout, state: Arc<(Mutex<EngineState>, 
                 guard.input_requested = false;
                 // Whatever list was on its way is not coming.
                 guard.metadata.reset();
+                guard.debug.reset();
+                guard.stopped = false;
             }
 
             // Anything else is not ours, and a foreign line must not end the session.
@@ -491,6 +609,10 @@ fn read_loop(stdout: std::process::ChildStdout, state: Arc<(Mutex<EngineState>, 
         // A command list that was half way here is never going to be finished, and the panel
         // has to be able to tell that case apart from one it is still waiting for.
         guard.metadata.reset();
+        guard.debug.reset();
+        // A stop dies with the engine. Leaving this set would leave the Debug menu offering
+        // Continue and Step over a window with no shell behind it.
+        guard.stopped = false;
     }
     state.1.notify_all();
 }

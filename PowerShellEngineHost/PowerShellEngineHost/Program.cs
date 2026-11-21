@@ -17,6 +17,10 @@ namespace PowerShellEngineHost;
 ///   T &lt;caret&gt; &lt;text&gt;    ask for TabExpansion2 completions
 ///   M &lt;what&gt;    command metadata for the Commands panel: "i" lists every command once,
 ///           "r" lists them again after a rescan, "d &lt;name&gt;" describes one command
+///   D &lt;verb&gt; [&lt;argument&gt;]  a debugger request; see DebugService for the verbs. Everything
+///           about the debugger is asked while execution is already held at a stop, which is
+///           why it has its own verb rather than more letters on "M": the runspace answers a
+///           metadata request only when it is idle, and while it is stopped it is not.
 ///   S         interrupt the running command (Ctrl+C)
 ///   P         print the prompt again (the front end cleared the console pane)
 ///   X         shut the session down
@@ -30,6 +34,17 @@ namespace PowerShellEngineHost;
 ///           reply is whole exactly when the parts seen reach &lt;of&gt;. &lt;reply&gt; counts
 ///           up with every answer, because a front end that has given up on one request
 ///           needs to be able to tell its parts from the next request's.
+///   D s &lt;reason&gt; &lt;line&gt; &lt;column&gt; &lt;script&gt;  execution is held at a stop, and where
+///   D r                 the stop has ended and the shell is running again
+///   D &lt;what&gt; &lt;part&gt; &lt;of&gt; &lt;reply&gt; &lt;text&gt;  one chunk of a debugger answer, framed exactly
+///           like a metadata reply but under its own letter, and counted by its own counter.
+///           &lt;what&gt; is "b" for the breakpoint list, "k" for the call stack, "l" for the
+///           variables of one frame, "p" for the answer to an expression. The rows inside
+///           are separated by U+001E and their fields by U+001F, as in a completion list.
+///           The letter is not "M" even though the framing is the same: the front end
+///           reassembles each kind in a buffer of its own, and a command index that is half
+///           way there when a variable list is written into the middle of it cannot be
+///           recovered afterwards.
 ///   Q &lt;code&gt;          the session is over
 ///
 /// Every &lt;text&gt; field is escaped so that a record never contains a line break: only
@@ -223,26 +238,31 @@ public static class Program
                             return;
 
                         case 'D':
-                            // Debug protocol: commands sent as 'D' followed by a verb and optional argument.
-                            // See DebugService for the list of supported verbs and their arguments.
-                            try
+                            // One debugger request: a verb, and the argument that belongs to
+                            // it. The split is on the first space only, and after decoding -
+                            // not before. Splitting the escaped text and joining the rest back
+                            // up would lose a run of spaces, and a script path or an
+                            // expression is exactly where a run of spaces lives.
+                            if (argument.Length == 0)
                             {
-                                if (argument.Length > 0)
-                                {
-                                    var parts = argument.Split(' ');
-                                    var dbgVerb = parts[0];
-                                    var arg = parts.Length > 1 ? string.Join(" ", parts.Skip(1)) : string.Empty;
-                                    session.TryQueueDebugRequest(dbgVerb, arg);
-                                }
-                                else
-                                {
-                                    session.TryQueueDebugRequest("q", "c"); // default: continue
-                                }
+                                session.DebugNotice("A debugger request needs a verb.");
+                                break;
                             }
-                            catch (Exception ex)
+
+                            string request = Decode(argument);
+                            int where = request.IndexOf(' ');
+                            // Not `verb`, which is the record's own first letter one scope out.
+                            string action = where < 0 ? request : request.Substring(0, where);
+                            string what = where < 0 ? string.Empty : request.Substring(where + 1);
+
+                            // Nothing is queued unless execution is actually held: outside a
+                            // stop the runspace would never come back for the request, and a
+                            // front end waiting for an answer would wait forever. Saying so is
+                            // the difference between a pane that explains itself and one that
+                            // quietly shows yesterday's variables.
+                            if (!session.TryQueueDebugRequest(action, what))
                             {
-                                WriteEvent(new OutputEvent(EventKinds.Error, ConsoleColor.Red, ConsoleColor.Black,
-                                    "Engine debug error: " + ex.Message + Environment.NewLine));
+                                session.DebugNotice("The shell is not stopped at a breakpoint, so there is nothing to inspect.");
                             }
                             break;
 
@@ -407,26 +427,7 @@ public static class Program
             return;
         }
 
-        int total = Math.Max(1, (payload.Length + MetadataChunk - 1) / MetadataChunk);
-        for (int i = 0, part = 1; part <= total; part++)
-        {
-            int take = Math.Min(MetadataChunk, Math.Max(0, payload.Length - i));
-
-            // Chopping a chunk anywhere would be wrong in exactly one place: between the two
-            // halves of a surrogate pair, which would hand the front end a character it cannot
-            // represent. A chunk loses its last character to the next one instead - but never
-            // down to nothing, or the part would be empty and everything after it unreachable.
-            if (take > 1 && i + take < payload.Length && char.IsHighSurrogate(payload[i + take - 1])) take--;
-
-            string piece = payload.Substring(i, take);
-            i += take;
-            WriteRaw(string.Concat(
-                "M ", kind, " ",
-                part.ToString(CultureInfo.InvariantCulture), " ",
-                total.ToString(CultureInfo.InvariantCulture), " ",
-                reply.ToString(CultureInfo.InvariantCulture), " ",
-                Encode(piece)));
-        }
+        WriteChunked("M", kind, payload, reply);
     }
 
     private static void WriteEvent(OutputEvent item)
@@ -457,19 +458,35 @@ public static class Program
     }
 
     /// <summary>
-    /// Writes a chunked reply with the given kind, payload, and reply number. Used by both
-    /// command metadata and debug replies so they share the same framing.
+    /// Writes a payload as numbered chunks under the given record letter: "M" for command
+    /// metadata, "D" for a debugger answer. The framing is identical, so it is implemented
+    /// once; the letter is not, and deliberately so. The front end reassembles each kind in a
+    /// buffer of its own, because a four-thousand-name command index that is half way here
+    /// when a variable list is written into the middle of it is not recoverable afterwards -
+    /// the two replies interleave by design, since both can arrive while the other is still
+    /// on its way.
     /// </summary>
-    internal static void WriteChunked(string kind, string payload, int reply)
+    internal static void WriteChunked(string verb, string kind, string payload, int reply)
     {
         int total = Math.Max(1, (payload.Length + MetadataChunk - 1) / MetadataChunk);
         for (int i = 0, part = 1; part <= total; part++)
         {
             int take = Math.Min(MetadataChunk, Math.Max(0, payload.Length - i));
+
+            // Chopping a chunk anywhere would be wrong in exactly one place: between the two
+            // halves of a surrogate pair, which would hand the front end a character it cannot
+            // represent. A chunk loses its last character to the next one instead - but never
+            // down to nothing, or the part would be empty and everything after it unreachable.
             if (take > 1 && i + take < payload.Length && char.IsHighSurrogate(payload[i + take - 1])) take--;
+
             string piece = payload.Substring(i, take);
             i += take;
-            WriteRaw(string.Concat("M ", kind, " ", part.ToString(CultureInfo.InvariantCulture), " ", total.ToString(CultureInfo.InvariantCulture), " ", reply.ToString(CultureInfo.InvariantCulture), " ", Encode(piece)));
+            WriteRaw(string.Concat(
+                verb, " ", kind, " ",
+                part.ToString(CultureInfo.InvariantCulture), " ",
+                total.ToString(CultureInfo.InvariantCulture), " ",
+                reply.ToString(CultureInfo.InvariantCulture), " ",
+                Encode(piece)));
         }
     }
 

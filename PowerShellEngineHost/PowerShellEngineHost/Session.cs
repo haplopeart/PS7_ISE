@@ -790,6 +790,15 @@ if ($null -ne $p -and $p.CurrentUserCurrentHost) {
     }
 
     /// <summary>
+    /// Answers a debugger request that could not be queued, in the same shape as a real
+    /// reply. See <see cref="DebugService.Notice"/>.
+    /// </summary>
+    public void DebugNotice(string message)
+    {
+        try { _debugger?.Notice(message); } catch { }
+    }
+
+    /// <summary>
     /// Writes a debug error record to the engine protocol, so the front end can display it
     /// in the Variables or Call Stack panes rather than throwing.
     /// </summary>

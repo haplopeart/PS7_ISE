@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 using System.Text;
+using System.Threading;
 
 namespace PowerShellEngineHost;
 
@@ -14,8 +15,25 @@ namespace PowerShellEngineHost;
 /// </summary>
 public sealed class DebugService
 {
-    /// <summary>Unique reply number for each debugger protocol request.</summary>
+    /// <summary>
+    /// Reply number for each debugger protocol request. Counted with Interlocked because a
+    /// reply is written both from the runspace thread, answering a request it took out of the
+    /// stop loop, and from the protocol thread, refusing a request that arrived with no stop
+    /// outstanding. Those two must not hand out the same number, or the front end stitches
+    /// half of a refusal onto the end of a variable list.
+    /// </summary>
     private int _reply;
+
+    /// <summary>Takes the next reply number.</summary>
+    private int NextReply() => Interlocked.Increment(ref _reply);
+
+    /// <summary>
+    /// Answers a request that never reached the stop loop, so the pane that asked has
+    /// something to show rather than waiting for an answer that is not coming. It is written
+    /// as an ordinary reply carrying one error row, which means the front end needs no second
+    /// path for a refusal: the same code shows it, in the same place, with the engine's words.
+    /// </summary>
+    public void Notice(string message) => Program.WriteChunked("D", "e", Rows(RowOf("e", message)), NextReply());
 
     /// <summary>Held around every debugger call.</summary>
     private readonly object _dbgGate = new();
@@ -121,20 +139,20 @@ public sealed class DebugService
     {
         switch (req.Verb)
         {
-            case "l": Program.WriteChunked("b", BreakpointRows(), _reply++); break;
-            case "k": Program.WriteChunked("k", CallStackRows(), _reply++); break;
-            case "b": Program.WriteChunked("b", EditBreakpoint(req.Argument), _reply++); break;
+            case "l": Program.WriteChunked("D", "b", BreakpointRows(), NextReply()); break;
+            case "k": Program.WriteChunked("D", "k", CallStackRows(), NextReply()); break;
+            case "b": Program.WriteChunked("D", "b", EditBreakpoint(req.Argument), NextReply()); break;
             case "v": 
                 if (int.TryParse(req.Argument, out int depth) && depth >= 0 && depth <= 20) 
                 { 
-                    Program.WriteChunked("l", Inspect(VariablesScript(depth)), _reply++); 
+                    Program.WriteChunked("D", "l", Inspect(VariablesScript(depth)), NextReply()); 
                 } 
                 else 
                 { 
                     _session?.DebugError("That is not a stack depth: " + req.Argument); 
                 } 
                 break;
-            case "p": Program.WriteChunked("p", Inspect(EvaluateScript(req.Argument)), _reply++); break;
+            case "p": Program.WriteChunked("D", "p", Inspect(EvaluateScript(req.Argument)), NextReply()); break;
             default: _session?.DebugError("Unknown debugger command '" + req.Verb + "'."); break;
         }
     }
@@ -164,7 +182,7 @@ public sealed class DebugService
     public string EditBreakpoint(string spec)
     {
         Debugger dbg = _dbg;
-        if (dbg == null) return Rows(RowOf("0", "", "0", "No runspace."));
+        if (dbg == null) return Rows(RowOf("e", "No runspace."));
 
         string verb = spec.Length > 0 ? spec.Substring(0, 1) : "";
         string rest = spec.Length > 2 ? spec.Substring(2) : "";
@@ -178,10 +196,10 @@ public sealed class DebugService
                 case "e": if (int.TryParse(rest, out int tid)) { lock (_dbgGate) { var bp = dbg.GetBreakpoint(tid); if (bp != null) dbg.EnableBreakpoint(bp); } } break;
                 case "d": if (int.TryParse(rest, out int tid2)) { lock (_dbgGate) { var bp = dbg.GetBreakpoint(tid2); if (bp != null) dbg.DisableBreakpoint(bp); } } break;
                 case "c": lock (_dbgGate) { foreach (var bp in dbg.GetBreakpoints().ToList()) dbg.RemoveBreakpoint(bp); } break;
-                default: return Rows(RowOf("0", "", "0", "Unknown: '" + verb + "'.")); break;
+                default: return Rows(RowOf("e", "Unknown breakpoint command '" + verb + "'."));
             }
         }
-        catch (Exception ex) { return Rows(RowOf("0", "", "0", Describe(ex))); }
+        catch (Exception ex) { return Rows(RowOf("e", Describe(ex))); }
 
         UpdateMode();
         return BreakpointRows();
@@ -208,7 +226,7 @@ public sealed class DebugService
 
         List<Breakpoint> points;
         try { lock (_dbgGate) { points = dbg.GetBreakpoints().ToList(); } }
-        catch (Exception ex) { return Rows(RowOf("0", "", "0", Describe(ex))); }
+        catch (Exception ex) { return Rows(RowOf("e", Describe(ex))); }
 
         var rows = new List<string>(points.Count);
         foreach (Breakpoint bp in points)
