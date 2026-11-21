@@ -26,6 +26,14 @@ elevation, installs to `C:\Program Files\HCW\PS7ISE`, puts `HCW\PS7 ISE` in the 
 with a desktop shortcut, and registers an uninstaller in Add/Remove Programs. Nothing has to
 be installed first: the installer carries the .NET runtime.
 
+### Signing
+
+The releases are not signed yet, so Windows shows SmartScreen warnings when running the
+installer from the browser. A code-signing certificate is being acquired so that
+`PS7ISE-Setup.exe` carries a digital signature and those warnings go away. Until then, the
+installer can be trusted by running it from a copy made locally rather than from a download,
+and the source is here for anyone who wants to build it themselves.
+
 To build the installer yourself you need [NSIS](https://nsis.sourceforge.io/Main_Page):
 
 ```powershell
