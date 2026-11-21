@@ -222,6 +222,30 @@ public static class Program
                             session.RequestExit(0);
                             return;
 
+                        case 'D':
+                            // Debug protocol: commands sent as 'D' followed by a verb and optional argument.
+                            // See DebugService for the list of supported verbs and their arguments.
+                            try
+                            {
+                                if (argument.Length > 0)
+                                {
+                                    var parts = argument.Split(' ');
+                                    var dbgVerb = parts[0];
+                                    var arg = parts.Length > 1 ? string.Join(" ", parts.Skip(1)) : string.Empty;
+                                    session.TryQueueDebugRequest(dbgVerb, arg);
+                                }
+                                else
+                                {
+                                    session.TryQueueDebugRequest("q", "c"); // default: continue
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                WriteEvent(new OutputEvent(EventKinds.Error, ConsoleColor.Red, ConsoleColor.Black,
+                                    "Engine debug error: " + ex.Message + Environment.NewLine));
+                            }
+                            break;
+
                         default:
                             break;
                     }
@@ -415,7 +439,7 @@ public static class Program
             Encode(item.Text)));
     }
 
-    private static void WriteRaw(string record)
+    internal static void WriteRaw(string record)
     {
         lock (_gate)
         {
@@ -432,8 +456,25 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// Writes a chunked reply with the given kind, payload, and reply number. Used by both
+    /// command metadata and debug replies so they share the same framing.
+    /// </summary>
+    internal static void WriteChunked(string kind, string payload, int reply)
+    {
+        int total = Math.Max(1, (payload.Length + MetadataChunk - 1) / MetadataChunk);
+        for (int i = 0, part = 1; part <= total; part++)
+        {
+            int take = Math.Min(MetadataChunk, Math.Max(0, payload.Length - i));
+            if (take > 1 && i + take < payload.Length && char.IsHighSurrogate(payload[i + take - 1])) take--;
+            string piece = payload.Substring(i, take);
+            i += take;
+            WriteRaw(string.Concat("M ", kind, " ", part.ToString(CultureInfo.InvariantCulture), " ", total.ToString(CultureInfo.InvariantCulture), " ", reply.ToString(CultureInfo.InvariantCulture), " ", Encode(piece)));
+        }
+    }
+
     /// <summary>Turns text into a single printable ASCII field.</summary>
-    private static string Encode(string text)
+    internal static string Encode(string text)
     {
         if (string.IsNullOrEmpty(text)) return string.Empty;
 

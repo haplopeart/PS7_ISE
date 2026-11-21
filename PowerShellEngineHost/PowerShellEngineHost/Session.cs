@@ -79,6 +79,13 @@ public sealed class Session
     /// </summary>
     private ModuleVerifier _verifier;
 
+    /// <summary>
+    /// The debugger service: breakpoints, stops, stepping, and the variable/call-stack reads
+    /// that only work while execution is held. Created once with the session, attached to the
+    /// runspace before the first prompt so the very first script is already breakable.
+    /// </summary>
+    private DebugService _debugger = new();
+
     public CommandMetadata GetMetadata() => _metadata;
 
     public int ExitCode => _exitCode;
@@ -185,6 +192,9 @@ public sealed class Session
 
         _runspace = RunspaceFactory.CreateRunspace(_host = new ISEHost(this), iss);
         _runspace.Open();
+
+        // Attach the debugger before the first prompt, so the very first script is breakable.
+        _debugger.Attach(this, _runspace);
 
         // A rich text control cannot draw ANSI escapes, so ask the engine for plain text.
         InvokeSetup("$PSStyle.OutputRendering = 'PlainText'");
@@ -753,6 +763,41 @@ if ($null -ne $p -and $p.CurrentUserCurrentHost) {
         foreach (char c in line ?? string.Empty) _keys.Enqueue(c);
         _input.Add(line ?? string.Empty);
         return true;
+    }
+
+    /// <summary>
+    /// Queues a command for the debugger while the session is stopped. Called by the protocol
+    /// thread when the debugger stop handler has reported its presence and accepted a request.
+    /// The command runs on the runspace thread, and the reply comes back as a series of
+    /// debug protocol records that the front end knows how to parse.
+    /// </summary>
+    public bool TryQueueDebugRequest(string verb, string argument)
+    {
+        if (_debugger == null) return false;
+        try { return _debugger.TryQueue(verb, argument); }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    /// <summary>
+    /// Queues a resume command for the debugger while the session is stopped. Used for
+    /// Ctrl+C when a command is running and the user wants to kill it while a stop is pending.
+    /// </summary>
+    public void RequestDebugResume(string verb)
+    {
+        if (!DebugService.ResumeVerb(verb).HasValue) return;
+        try { _debugger.RequestResume(verb); }
+        catch (InvalidOperationException) { }
+    }
+
+    /// <summary>
+    /// Writes a debug error record to the engine protocol, so the front end can display it
+    /// in the Variables or Call Stack panes rather than throwing.
+    /// </summary>
+    public void DebugError(string message)
+    {
+        try { Emit(EventKinds.Debug, ConsoleColor.DarkGray, ConsoleColor.Black,
+            "Debug error: " + message); }
+        catch { }
     }
 
     public void RequestExit(int code)
