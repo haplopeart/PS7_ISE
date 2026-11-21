@@ -1,7 +1,0 @@
-{"line":"E 1 13421772 0 PS\\u003e\\u0020","expect":{"type":"output","kind":"Output","fg":[204,204,204],"bg":[0,0,0],"text":"PS> "}}
-{"line":"E 2 16711680 0 Oops\\u000d\\u000a","expect":{"type":"output","kind":"Error","fg":[255,0,0],"bg":[0,0,0],"text":"Oops\r\n"}}
-{"line":"C 2 Get-ChildItem\\u001eGet-Command","expect":{"type":"completions","items":["Get-ChildItem","Get-Command"]}}
-{"line":"Q 0","expect":{"type":"quit","code":0}}
-{"line":"M i 1 1 7 name\\u001fsource","expect":{"type":"metadata","kind":"i","part":1,"of":1,"reply":7,"payload":"name\u001fsource"}}
-{"line":"D s breakpoint 42 1 C:\\script.ps1","expect":{"type":"debug_stop","reason":"breakpoint","line":42,"col":1,"path":"C:\\script.ps1"}}
-{"line":"D r","expect":{"type":"debug_resumed"}}

@@ -29,22 +29,18 @@
     -->
     <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
     <UseAppHost>true</UseAppHost>
-    <!-- Default to win-x64 for existing Windows builds; override with -r osx-arm64/osx-x64/linux-x64 etc. -->
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <NoWarn>CA1416;CS1591</NoWarn>
     <!--
-      Allow roll-forward to nearest available patch/minor. Important on dev machines
-      and for cross-platform SDK/runtime patch differences.
+      The machine only has x64 Microsoft.NETCore.App 10.0.1+ installed, not exactly 10.0.0.
+      Allow the app to roll forward to the nearest available patch rather than failing at
+      launch because the exact canonical version is missing.
     -->
     <RollForward>LatestMinor</RollForward>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
-    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
