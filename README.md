@@ -32,6 +32,12 @@ the tabbed script pane - with something the target platform provides.
 Nothing to download from this repository for either port yet. The builds here, including
 `PS7ISE-Setup.exe` and the committed `dist\`, remain **Windows x64 only**.
 
+The port is being worked on in the open on the
+[`MAC-Linux` branch](https://github.com/haplopeart/PS7_ISE/tree/MAC-Linux), which carries a
+second front-end (`cross-platform-ui\`), a `build.sh`, a cross-platform CI workflow, and the
+port plan it is following. That work is kept off `main` for now, so nothing in a release
+depends on it.
+
 ## Install
 
 Run `PS7ISE-Setup.exe` from the
