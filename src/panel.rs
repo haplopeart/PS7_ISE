@@ -34,16 +34,22 @@ const LB_SETTOPINDEX: u32 = 0x0197;
 /// command by its name.
 pub const MIN_WIDTH: i32 = 360;
 
-/// The widest it is ever drawn: past this the column is a wide empty gutter rather than a useful
-/// list, and the script and console panes are the ones losing the space.
-pub const MAX_WIDTH: i32 = 560;
+/// The width the Commands column keeps, whatever the window is doing. The panes on its left give
+/// it up and take the rest: a maximised window is wider, not more column, and the script and
+/// console panes are the ones that wanted the room.
+pub const COLUMN_WIDTH: i32 = 360;
 
-/// How much of the window the column asks for. A third of it, between the two bounds: on the
-/// default window that is close to what the column used to be fixed at, and on a maximised one it
-/// gives the user back the ratio they chose instead of a 322 px strip beside two enormous panes.
+/// How wide the column is allowed to be. It does not follow the window: the panes beside it are
+/// what grow when the window does, so a maximised window is wider rather than more column. The
+/// one thing the window's own width still decides is whether the column fits at all, so a window
+/// too narrow to hold it is told the column is as narrow as it can be rather than being handed
+/// one that cannot fit. The margin is the same `BORDER` the panes take on their left, so the two
+/// calculations agree about what space is left.
 pub fn width_for(client_width: i32) -> i32 {
-    (client_width * 30 / 100).clamp(MIN_WIDTH, MAX_WIDTH)
+    COLUMN_WIDTH.min((client_width - 2 * MARGIN).max(MIN_WIDTH))
 }
+
+const MARGIN: i32 = 2;
 
 const PAD: i32 = 4;
 const GAP: i32 = 4;
