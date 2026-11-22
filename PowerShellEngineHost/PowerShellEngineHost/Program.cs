@@ -17,10 +17,16 @@ namespace PowerShellEngineHost;
 ///   T &lt;caret&gt; &lt;text&gt;    ask for TabExpansion2 completions
 ///   M &lt;what&gt;    command metadata for the Commands panel: "i" lists every command once,
 ///           "r" lists them again after a rescan, "d &lt;name&gt;" describes one command
-///   D &lt;verb&gt; [&lt;argument&gt;]  a debugger request; see DebugService for the verbs. Everything
-///           about the debugger is asked while execution is already held at a stop, which is
-///           why it has its own verb rather than more letters on "M": the runspace answers a
-///           metadata request only when it is idle, and while it is stopped it is not.
+///   D &lt;verb&gt; [&lt;argument&gt;]  a debugger request, as one escaped field the engine splits on
+///           its first space. See DebugService for what each verb does. Two of them - "b"
+///           edits a breakpoint, "l" lists them - are answered wherever the shell happens to
+///           be, because a breakpoint belongs to the debugger and a user sets one while the
+///           script is sitting at the prompt. The rest are about a stopped frame and are only
+///           answered while execution is held: "k" the call stack, "v &lt;depth&gt;" the variables
+///           of one frame, "p &lt;expression&gt;" an expression, and "c" "i" "o" "u" "q" to continue,
+///           step into, step over, step out, or abandon the script. A request that cannot be
+///           answered comes back as a refusal rather than as silence, so no pane has to wait
+///           for an answer that is never going to arrive.
 ///   S         interrupt the running command (Ctrl+C)
 ///   P         print the prompt again (the front end cleared the console pane)
 ///   X         shut the session down
@@ -34,13 +40,20 @@ namespace PowerShellEngineHost;
 ///           reply is whole exactly when the parts seen reach &lt;of&gt;. &lt;reply&gt; counts
 ///           up with every answer, because a front end that has given up on one request
 ///           needs to be able to tell its parts from the next request's.
-///   D s &lt;reason&gt; &lt;line&gt; &lt;column&gt; &lt;script&gt;  execution is held at a stop, and where
+///   D s &lt;reason&gt; &lt;line&gt; &lt;column&gt; &lt;script&gt;  execution is held at a stop, and where.
+///           &lt;reason&gt; is "breakpoint" when a breakpoint was hit and "step" when the user asked
+///           to step to this line, which is the only thing that tells a pause apart from a
+///           hit. The script is empty when the frame has no file of its own.
 ///   D r                 the stop has ended and the shell is running again
 ///   D &lt;what&gt; &lt;part&gt; &lt;of&gt; &lt;reply&gt; &lt;text&gt;  one chunk of a debugger answer, framed exactly
 ///           like a metadata reply but under its own letter, and counted by its own counter.
-///           &lt;what&gt; is "b" for the breakpoint list, "k" for the call stack, "l" for the
-///           variables of one frame, "p" for the answer to an expression. The rows inside
-///           are separated by U+001E and their fields by U+001F, as in a completion list.
+///           &lt;what&gt; is "b" for the breakpoint list, "k" for the call stack, "v" for the
+///           variables of one frame, "p" for the answer to an expression, "e" for a request
+///           that could not be answered. The rows inside are separated by U+001E and their
+///           fields by U+001F, as in a completion list, and a row starts with "v" for a value,
+///           "e" for a failure the engine named, or "n" for the engine saying a list is empty
+///           on purpose - which is not the same as a reply that failed to arrive, and not the
+///           same as nothing at all.
 ///           The letter is not "M" even though the framing is the same: the front end
 ///           reassembles each kind in a buffer of its own, and a command index that is half
 ///           way there when a variable list is written into the middle of it cannot be
@@ -249,21 +262,31 @@ public static class Program
                                 break;
                             }
 
-                            string request = Decode(argument);
-                            int where = request.IndexOf(' ');
-                            // Not `verb`, which is the record's own first letter one scope out.
-                            string action = where < 0 ? request : request.Substring(0, where);
-                            string what = where < 0 ? string.Empty : request.Substring(where + 1);
+                            string dbgText = Decode(argument);
+                            int dbgSpace = dbgText.IndexOf(' ');
+                            string dbgVerb = dbgSpace < 0 ? dbgText : dbgText.Substring(0, dbgSpace);
+                            string dbgWhat = dbgSpace < 0 ? string.Empty : dbgText.Substring(dbgSpace + 1);
 
-                            // Nothing is queued unless execution is actually held: outside a
-                            // stop the runspace would never come back for the request, and a
-                            // front end waiting for an answer would wait forever. Saying so is
-                            // the difference between a pane that explains itself and one that
-                            // quietly shows yesterday's variables.
-                            if (!session.TryQueueDebugRequest(action, what))
-                            {
-                                session.DebugNotice("The shell is not stopped at a breakpoint, so there is nothing to inspect.");
-                            }
+                            // A stopped shell answers in its own loop, so that its replies come
+                            // back in the order they were asked for and nothing the protocol
+                            // thread does can slip between a request and its answer.
+                            if (session.TryQueueDebugRequest(dbgVerb, dbgWhat)) break;
+
+                            // Not stopped. Breakpoints are still the debugger's own business and
+                            // are answered here, on this thread, because the moment a user wants
+                            // to set one is usually while the script is doing something else.
+                            if (session.DebugBreakpoints(dbgVerb, dbgWhat)) break;
+
+                            // A resume with nothing stopped asks for nothing. It is not worth a
+                            // line in a pane: F5 is also Run Script on this keyboard, and the
+                            // window only sends this verb when it believes it is paused.
+                            if (DebugService.ResumeVerb(dbgVerb).HasValue) break;
+
+                            // Everything else reads a frame, and there is no frame to read.
+                            // Saying so is the difference between a pane that explains itself and
+                            // one that quietly goes on showing the variables from the last time
+                            // the script stopped.
+                            session.DebugNotice("The shell is not stopped at a breakpoint, so there is nothing to inspect.");
                             break;
 
                         default:

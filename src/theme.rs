@@ -165,6 +165,16 @@ pub struct Palette {
     pub gutter_bg: Rgb,
     pub gutter_fg: Rgb,
     pub gutter_sep: Rgb,
+    /// The dot a line with a breakpoint carries. It is the one thing in the margin that is not
+    /// a number or a rule, so it is also the one place a colour can mean something on its own.
+    pub breakpoint: Rgb,
+    /// A breakpoint that is there but not armed. Dimmed rather than hidden, because forgetting
+    /// about a breakpoint you switched off is how a script gets blamed for running straight
+    /// through it.
+    pub breakpoint_off: Rgb,
+    /// The number of the line execution is held on, and the band behind it.
+    pub stop_fg: Rgb,
+    pub stop_bg: Rgb,
     pub syntax: Syntax,
 
     window_brush: *mut c_void,
@@ -238,6 +248,10 @@ impl Palette {
             gutter_bg: [0xFF, 0xFF, 0xFF],
             gutter_fg: [0xA0, 0xA0, 0xA0],
             gutter_sep: [0xDC, 0xDC, 0xDC],
+            breakpoint: [0xC5, 0x3A, 0x3A],
+            breakpoint_off: [0xD6, 0xB4, 0xB4],
+            stop_fg: [0x8A, 0x5A, 0x00],
+            stop_bg: [0xFF, 0xF0, 0xC8],
             syntax: Syntax {
                 text: [0x00, 0x00, 0x00],
                 comment: [0x00, 0x80, 0x00],
@@ -265,6 +279,10 @@ impl Palette {
             gutter_bg: [0x1F, 0x1F, 0x1F],
             gutter_fg: [0x85, 0x85, 0x85],
             gutter_sep: [0x3F, 0x3F, 0x3F],
+            breakpoint: [0xF0, 0x5A, 0x5A],
+            breakpoint_off: [0x6E, 0x4A, 0x4A],
+            stop_fg: [0xE8, 0xB8, 0x4A],
+            stop_bg: [0x3A, 0x33, 0x1E],
             syntax: Syntax {
                 text: [0xDC, 0xDC, 0xDC],
                 comment: [0x6A, 0x99, 0x55],

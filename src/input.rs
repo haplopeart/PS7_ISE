@@ -155,6 +155,26 @@ pub fn clear_line() {
 }
 
 pub fn stop_execution() {
+    // Ctrl+C usually means stop what is running. While a breakpoint is holding the script there
+    // is nothing running to interrupt — the interrupt would only reach a shell that was busy —
+    // and what the user wants is out, which is the debugger's `q`.
+    if read(|s| {
+        s.engine
+            .as_ref()
+            .map(|engine| engine.is_stopped())
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
+    {
+        write(|s| {
+            if let Some(engine) = s.engine.as_mut() {
+                engine.debug_resume("q");
+            }
+        });
+        console_write("^C\n", DIM_FG);
+        return;
+    }
+
     write(|s| {
         if let Some(engine) = s.engine.as_mut() {
             engine.stop();
@@ -278,6 +298,83 @@ pub fn control_c() {
     }
 }
 
+/// What a right click on the console pane means: the highlighted text goes to the clipboard, and
+/// when nothing is highlighted, the clipboard comes back the other way into the prompt.
+///
+/// Two verbs on one button rather than a menu, which is what a console has always done and what
+/// this pane can actually honour. A Cut/Copy/Paste menu would be the honest interface, but the
+/// pane is not a normal edit control — its text lives in memory here and is rewritten after every
+/// run, and the standard write messages do nothing to it — so a menu item for each verb would
+/// have to be wired to this module one way or another anyway.
+///
+/// Paste goes through the same path as typing, so it lands in the command being written rather
+/// than somewhere in the transcript above it, and a right click during a run does nothing at all,
+/// because there is no prompt to put anything into.
+pub fn console_right_click() {
+    let has_selection = read(|s| {
+        s.console_view
+            .as_ref()
+            .map(|view| {
+                let sel = view.selection();
+                sel.start != sel.end
+            })
+            .unwrap_or(false)
+    })
+    .unwrap_or(false);
+
+    if has_selection {
+        copy_selection();
+    } else {
+        paste();
+    }
+
+    if crate::state::debug_enabled() {
+        // Which of the two verbs the click chose is the whole of what this function decides, and
+        // neither the clipboard nor the pane's text can be read from a test process, so the log
+        // is where a test looks. See also `editor_right_click`.
+        crate::state::log_line(&format!(
+            "right click console: {}",
+            if has_selection { "copy" } else { "paste" }
+        ));
+    }
+}
+
+/// The same two verbs for the script pane. This one *is* a Rich Edit control, so it is the two
+/// messages the control answers by itself — `WM_COPY` when something is highlighted, `WM_PASTE`
+/// when nothing is — rather than code here moving text about. Using the control's own messages is
+/// what keeps its undo history sane: text this window inserted on the user's behalf is one undo
+/// step they never asked for, and pasting is something they will want to take back.
+pub fn editor_right_click() {
+    let Some((hwnd, selected)) = read(|s| {
+        let hwnd = s.editor.handle.hwnd()?;
+        let sel = s.editor.selection();
+        Some((hwnd, sel.start != sel.end))
+    })
+    .flatten() else {
+        return;
+    };
+
+    let message = if selected {
+        crate::console::WM_COPY
+    } else {
+        crate::console::WM_PASTE
+    };
+    crate::console::send_message(hwnd as *mut std::ffi::c_void, message, 0, 0);
+
+    if crate::state::debug_enabled() {
+        // The message is what the control was told and the log is what a test can read: a Rich
+        // Edit's contents are not readable from another process, and which of its two messages
+        // went in is the entire decision this function makes.
+        crate::state::log_line(&format!(
+            "right click editor: {}",
+            if selected { "copy" } else { "paste" }
+        ));
+    }
+}
+
+/// Copies the console pane's selection, if it has one. An empty selection leaves the clipboard
+/// alone rather than clearing it, because a right click that loses what was copied an hour ago is
+/// a right click the user did not ask for.
 pub fn copy_selection() {
     let text = read(|s| {
         let Some(view) = s.console_view.as_ref() else { return String::new(); };
@@ -512,9 +609,22 @@ pub fn on_keydown(vk: u32) -> bool {
 }
 
 pub fn paste() {
-    if !read(|s| s.input_open).unwrap_or(false) { return; }
+    // Both refusals are written down, because from outside the window a paste that did nothing
+    // looks exactly like a paste that has not arrived yet: the pane shows no text either way, and
+    // its text cannot be read from another process to find out which.
+    if !read(|s| s.input_open).unwrap_or(false) {
+        if crate::state::debug_enabled() {
+            crate::state::log_line("paste: refused, the prompt is not open");
+        }
+        return;
+    }
     let text = read_clipboard();
-    if text.is_empty() { return; }
+    if text.is_empty() {
+        if crate::state::debug_enabled() {
+            crate::state::log_line("paste: refused, the clipboard holds no text");
+        }
+        return;
+    }
     let text = text.replace('\r', "");
     if !text.contains('\n') {
         insert_typed(&text); return;
@@ -621,7 +731,39 @@ fn inject_key(name: &str) -> bool {
             }
             return true;
         }
+        // Puts the caret on a line of the script pane, so the keys that work on the caret - F9
+        // above all - can be tested against a line the test chose rather than line 1.
+        _ if name.to_ascii_uppercase().starts_with("LINE:") => {
+            if let Ok(line) = name[5..].trim().parse::<i32>() {
+                crate::state::caret_to_line(line);
+            }
+            return true;
+        }
+        // Asks the stopped frame an expression, the way the Evaluate button does. Reaching it
+        // this way rather than by typing into the box keeps the test on the request and its
+        // answer, which is what could go wrong; the box is only a way to get there.
+        _ if name.to_ascii_uppercase().starts_with("EVAL:") => {
+            crate::debug_pane::evaluate(&name[5..]);
+            return true;
+        }
+        // Presses a function key the way the panes' own handlers do, so a test exercises the
+        // same routing as the keyboard: F5 runs the script or lets a stopped one go on, and
+        // which of the two it is depends on the state the shell is in.
+        "F1" => return crate::shortcut(nwg::keys::F1, true),
+        "F5" => return crate::shortcut(nwg::keys::F5, true),
+        "F8" => return crate::shortcut(nwg::keys::F8, true),
+        "F9" => return crate::shortcut(nwg::keys::F9, true),
+        "F10" => return crate::shortcut(nwg::keys::F10, true),
+        "F11" => return crate::shortcut(nwg::keys::F11, true),
         "TAB" => return on_char('\t'),
+        // Writes what the Debugger column is holding into the log. The column's labels and lists
+        // cannot be read from another process any more than the panes can, so without this a test
+        // can only photograph the window and guess; with it, it reads the same strings `repaint`
+        // handed the controls.
+        "DUMP" => {
+            crate::debug_pane::dump_to_log();
+            return true;
+        }
         "ENTER" => {
             submit_input();
             return true;

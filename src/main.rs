@@ -14,6 +14,7 @@ extern crate native_windows_gui as nwg;
 mod commands;
 mod console;
 mod debug;
+mod debug_pane;
 mod docs;
 mod engine;
 mod gutter;
@@ -278,6 +279,11 @@ fn build_ui() -> *mut AppState {
     }
     let commands = panel::create(&window, Some(&panel_font));
 
+    // The Debugger column, under the Commands one. Same font for the same reason: both are
+    // lists of names in the same narrow strip, and two sizes in one column reads as two
+    // windows that have nothing to do with each other.
+    let debugger = debug_pane::create(&window, Some(&panel_font));
+
     // Shell output is polled on this timer, which also starts the engine once the
     // window has been shown.
     let mut timer: nwg::Timer = Default::default();
@@ -315,7 +321,7 @@ fn build_ui() -> *mut AppState {
         line_gutter: gutter,
         gutter_font: Some(gutter_font),
         caret_text: String::new(),
-        gutter_key: (0, 1, 0),
+        gutter_key: (0, 1, 0, 0),
         menus: menus.0,
         menu_items: menus.1,
         items: menus.2,
@@ -330,6 +336,9 @@ fn build_ui() -> *mut AppState {
         show_console: true,
         show_commands: true,
         commands,
+        debugger,
+        show_debugger: false,
+        debug: debug::Model::default(),
         panel_font: Some(panel_font),
         engine: None,
         docs: vec![state::Doc {
@@ -414,12 +423,27 @@ fn build_menus(
     add(2, "Run &Selection\tF8", cmd::RUN_SELECTION);
     add(2, "&Stop Run\tCtrl+C", cmd::STOP);
 
+    // The debugger, in the order its own keys are reached for: put a breakpoint down, run to
+    // it, walk through the script a line at a time, get out again. The original ISE keeps
+    // these beside Run rather than in a menu of their own, for the same reason: F5 either runs
+    // the script or lets it go on, and the two belong where the choice is made.
+    add(2, "Toggle &Breakpoint\tF9", cmd::TOGGLE_BREAKPOINT);
+    add(2, "Clear All B&reakpoints", cmd::CLEAR_BREAKPOINTS);
+    // F5 is labelled on both Run Script and Continue because it does both, and which one it
+    // did is decided by whether the shell is held: the same key, the same reason.
+    add(2, "&Continue\tF5", cmd::CONTINUE);
+    add(2, "Step &Into\tF11", cmd::STEP_INTO);
+    add(2, "Step &Over\tF10", cmd::STEP_OVER);
+    add(2, "Step O&ut\tShift+F11", cmd::STEP_OUT);
+    add(2, "&Stop Debugger\tShift+F5", cmd::STOP_DEBUGGING);
+
     add(3, "Show/Hide &Script Pane", cmd::TOGGLE_SCRIPT_PANE);
     add(3, "Show/Hide &Command Pane", cmd::TOGGLE_CONSOLE_PANE);
     add(3, "C&lear Command Pane", cmd::CLEAR_CONSOLE);
     // "Commands", plural, and a different verb: the item above called the console the command
     // pane, and two "Show/Hide Command..." lines in one menu would be unreadable.
     add(3, "Sho&w Commands Column", cmd::TOGGLE_COMMANDS);
+    add(3, "&Show Debugger Column", cmd::TOGGLE_DEBUGGER);
     add(3, "&Refresh Command List", cmd::REFRESH_COMMANDS);
 
     add(4, "PowerShell 7 &Help\tF1", cmd::HELP);
@@ -613,7 +637,10 @@ fn layout() {
         // original ISE docks it the same way rather than floating it over the panes. The width is
         // whatever the window can spare rather than a fixed number, so a wider window widens the
         // column along with the panes instead of leaving a strip of the old size beside them.
-        let panel_width = if s.show_commands {
+        //
+        // The Debugger column is the same strip, under the Commands one, so one column of that
+        // width is given up whether one add-on is showing, the other, or both.
+        let panel_width = if s.show_commands || s.show_debugger {
             panel::width_for(width) + GAP
         } else {
             0
@@ -682,7 +709,46 @@ fn layout() {
         let column_w = panel::width_for(width);
         let x = (width - BORDER - column_w).max(BORDER);
         let height = (height - TOOLBAR_H - STATUS_H - GAP).max(120);
-        panel::layout(&mut s.commands, x, TOOLBAR_H, column_w, height, s.show_commands);
+
+        // The two add-ons share the strip, Commands above Debugger, which is how the original
+        // stacked the panes it had. When only one is showing it has the strip to itself: half a
+        // window on an add-on that is hidden is space nobody is using.
+        let both = s.show_commands && s.show_debugger;
+        let debug_h = if s.show_debugger {
+            if both {
+                (height * 45 / 100).max(180)
+            } else {
+                height
+            }
+        } else {
+            0
+        };
+        let commands_h = if s.show_debugger && s.show_commands {
+            (height - debug_h - GAP).max(120)
+        } else {
+            height
+        };
+
+        panel::layout(
+            &mut s.commands,
+            x,
+            TOOLBAR_H,
+            column_w,
+            commands_h,
+            s.show_commands,
+        );
+        debug_pane::layout(
+            &mut s.debugger,
+            x,
+            if s.show_commands {
+                TOOLBAR_H + commands_h + GAP
+            } else {
+                TOOLBAR_H
+            },
+            column_w,
+            debug_h,
+            s.show_debugger,
+        );
     });
 }
 
@@ -743,15 +809,14 @@ fn bind_handlers() {
                         None
                     }
                 }
-                console::WM_RBUTTONDOWN => {
-                    // Right-click: copy any selection to the clipboard.
-                    // copy_selection() is a no-op when there is no selection.
-                    input::copy_selection();
-                    Some(0)
-                }
+                // Right click: copy what is highlighted, or paste into the prompt when nothing
+                // is. Handled on the context-menu message rather than on the button itself, and
+                // the button is passed on, so the click still does whatever the control does with
+                // a right button — including nothing to the text, which is the point: a right
+                // click that moved the caret would paste somewhere other than where the user put
+                // it.
                 console::WM_CONTEXTMENU => {
-                    // Right-click context: copy any selection to the clipboard.
-                    input::copy_selection();
+                    input::console_right_click();
                     Some(0)
                 }
                 _ => None,
@@ -771,6 +836,12 @@ fn bind_handlers() {
     if let Ok(handler) =
         nwg::bind_raw_event_handler(&editor, EDITOR_SUBCLASS_ID, move |_hwnd, msg, w, _l| {
             if msg == console::WM_KEYDOWN && shortcut(w as u32, true) {
+                return Some(0);
+            }
+            // Right click in the script pane: the same copy-or-paste the console has, so the two
+            // panes answer the same click with the same two verbs.
+            if msg == console::WM_CONTEXTMENU {
+                input::editor_right_click();
                 return Some(0);
             }
             None
@@ -807,18 +878,23 @@ fn dispatch(evt: E, _data: nwg::EventData, handle: nwg::ControlHandle) {
         }
         E::OnTimerTick => on_tick(),
         E::OnMenuItemSelected | E::OnButtonClick => {
-            // A click from a control that is not in the menu table came out of the Commands
-            // column: its buttons and its check box are not menu commands.
+            // A click from a control that is not in the menu table came out of one of the two
+            // add-on columns: their buttons and their check box are not menu commands.
             match state::command_for(&handle) {
                 Some(id) => run_command(id),
                 None => {
-                    panel::on_event(evt, &handle);
+                    if !panel::on_event(evt, &handle) {
+                        debug_pane::on_event(evt, &handle);
+                    }
                 }
             }
         }
-        // The Commands column's dropdown and its two lists.
+        // The two columns' dropdowns and lists. Whichever one a list belongs to is decided by
+        // the handle, so the event is offered to both.
         E::OnComboxBoxSelection | E::OnListBoxSelect | E::OnListBoxDoubleClick => {
-            panel::on_event(evt, &handle);
+            if !panel::on_event(evt, &handle) {
+                debug_pane::on_event(evt, &handle);
+            }
         }
         E::TabsContainerChanged => {
             if state::is(&handle, |s| s.tabs.handle) {
@@ -865,7 +941,10 @@ fn on_tick() {
 /// two panes report are matched here instead, from their subclass hooks - the dispatch
 /// level proved unreliable for the modified combinations. Returns true when the key was
 /// acted on, which stops it reaching the control underneath.
-fn shortcut(vk: u32, from_editor: bool) -> bool {
+///
+/// `pub` so the debug harness can press one of these keys through `{F5}` and friends and
+/// reach the same routing the keyboard does.
+pub fn shortcut(vk: u32, from_editor: bool) -> bool {
     const VK_C: u32 = 0x43;
     const VK_N: u32 = 0x4E;
     const VK_O: u32 = 0x4F;
@@ -874,9 +953,28 @@ fn shortcut(vk: u32, from_editor: bool) -> bool {
 
     let ctrl = console::ctrl_pressed();
     if !ctrl {
+        // F5 is the run key, and the continue key once the shell is held. One key for both
+        // because it is one question - go - and a window that made the user look for where they
+        // had put "go on" would be a window with two buttons that do the same thing.
+        if vk == nwg::keys::F5 {
+            if state::debug_stopped() {
+                // With Shift on it is the way out of the session rather than through it.
+                debug_resume(if console::shift_pressed() { "q" } else { "c" });
+            } else {
+                docs::run_script();
+            }
+            return true;
+        }
+
         match vk {
-            nwg::keys::F5 => docs::run_script(),
             nwg::keys::F8 => docs::run_selection(),
+            // A breakpoint belongs to a line, and the line is the one the caret is on or the one
+            // under the pointer in the margin. Either way it works at a prompt, which is the
+            // only place a breakpoint is ever actually put down.
+            nwg::keys::F9 => state::toggle_breakpoint(state::caret_line()),
+            nwg::keys::F10 => debug_resume("o"),
+            // F11 goes into what the line calls; Shift+F11 goes out of the frame it is in.
+            nwg::keys::F11 => debug_resume(if console::shift_pressed() { "u" } else { "i" }),
             nwg::keys::F1 => show_help(),
             _ => return false,
         }
@@ -928,16 +1026,47 @@ fn run_command(id: u32) {
         RUN_SCRIPT => docs::run_script(),
         RUN_SELECTION => docs::run_selection(),
         STOP => input::stop_execution(),
+
+        TOGGLE_BREAKPOINT => {
+            let line = state::caret_line();
+            state::toggle_breakpoint(line);
+        }
+        CLEAR_BREAKPOINTS => state::clear_breakpoints(),
+        // The resumes are only meaningful while the shell is held, and the keys that reach
+        // them are only offered then; asked outside a stop, they would be a message the engine
+        // has to refuse, so the window refuses them where the user asked.
+        CONTINUE => debug_resume("c"),
+        STEP_INTO => debug_resume("i"),
+        STEP_OVER => debug_resume("o"),
+        STEP_OUT => debug_resume("u"),
+        STOP_DEBUGGING => debug_resume("q"),
+
         CLEAR_CONSOLE => input::clear_console(),
         TOGGLE_SCRIPT_PANE => toggle_panes(true),
         TOGGLE_CONSOLE_PANE => toggle_panes(false),
         TOGGLE_COMMANDS => panel::toggle(),
+        TOGGLE_DEBUGGER => debug_pane::toggle(),
         REFRESH_COMMANDS => panel::refresh(),
         HELP => show_help(),
         ABOUT => show_about(),
         RUN_AS_ADMIN => run_as_admin(),
         _ => {}
     }
+}
+
+/// Sends one of the debug keys. The shortcuts are matched here rather than in an accelerator
+/// table because the two panes are the controls that see them, and because two of them mean
+/// different things depending on whether the shell is held — see `shortcut`.
+fn debug_resume(verb: &str) {
+    if state::debug_stopped() {
+        state::debug_resume(verb);
+        return;
+    }
+    // Not an error the user made: F5 is also the run key, and F9 works without a stop at all,
+    // so a step asked for at a prompt is a key pressed a moment early rather than a mistake. It
+    // is said in the status bar rather than left un answered, because a key that does nothing
+    // silently is a key the user stops pressing.
+    state::set_status("The shell is not stopped at a breakpoint, so there is nothing to step through.");
 }
 
 /// Sends Cut/Copy/Paste to the script pane.
@@ -973,7 +1102,9 @@ fn show_about() {
          An open-source clone of the PowerShell Integrated Scripting Environment.\n\
          PowerShell 7 runs in PowerShellEngineHost.exe next to this program, so the\n\
          console, the tabbed script editor and TabExpansion2 completion talk to a\n\
-         real runspace. The Windows controls are native; no web view is involved.\n\n\
+         real runspace, and so does the debugger: its breakpoints stop the same\n\
+         shell the prompt is typing into. The Windows controls are native; no web\n\
+         view is involved.\n\n\
          Support Me on Patreon: https://patreon.com/haplopeart",
         VERSION
     );

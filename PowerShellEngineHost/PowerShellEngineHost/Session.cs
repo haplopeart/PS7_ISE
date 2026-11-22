@@ -771,6 +771,11 @@ if ($null -ne $p -and $p.CurrentUserCurrentHost) {
     /// The command runs on the runspace thread, and the reply comes back as a series of
     /// debug protocol records that the front end knows how to parse.
     /// </summary>
+    /// <summary>
+    /// Offers a debugger request to the stop loop. True when execution was held and the
+    /// request was taken; false when it was not, which means nobody is going to answer it and
+    /// the caller owes the front end a refusal.
+    /// </summary>
     public bool TryQueueDebugRequest(string verb, string argument)
     {
         if (_debugger == null) return false;
@@ -790,8 +795,27 @@ if ($null -ne $p -and $p.CurrentUserCurrentHost) {
     }
 
     /// <summary>
-    /// Answers a debugger request that could not be queued, in the same shape as a real
-    /// reply. See <see cref="DebugService.Notice"/>.
+    /// Answers a breakpoint request. Breakpoints belong to the debugger rather than to a stop,
+    /// so this runs on the protocol thread and works whether or not execution is held; see
+    /// <see cref="DebugService.TryAnswerBreakpoints"/>.
+    /// </summary>
+    /// <param name="verb">"b" to edit a breakpoint, "l" to list them.</param>
+    /// <param name="argument">The edit, empty for a plain listing.</param>
+    /// <returns>
+    /// True when this was a breakpoint request and has been answered here, which is how the
+    /// caller knows not to refuse a request it has already replied to.
+    /// </returns>
+    public bool DebugBreakpoints(string verb, string argument)
+    {
+        try { return _debugger != null && _debugger.TryAnswerBreakpoints(verb, argument); }
+        // The answer the caller is waiting for has to go out either way, so a failure is
+        // reported as a refusal of the request rather than as nothing at all.
+        catch (Exception ex) { DebugNotice(ex.Message); return true; }
+    }
+
+    /// <summary>
+    /// Refuses a debugger request that never reached the stop loop, in the same shape as a
+    /// real reply. See <see cref="DebugService.Notice"/>.
     /// </summary>
     public void DebugNotice(string message)
     {
@@ -799,15 +823,13 @@ if ($null -ne $p -and $p.CurrentUserCurrentHost) {
     }
 
     /// <summary>
-    /// Writes a debug error record to the engine protocol, so the front end can display it
-    /// in the Variables or Call Stack panes rather than throwing.
+    /// Answers a debugger request with a failure, in the same shape as a real reply, so the
+    /// pane that asked explains itself instead of going on waiting for an answer. It is not
+    /// written to the console pane: a call stack that could not be read is news about the
+    /// Variables pane, not something the user typed at a prompt and expects to see between
+    /// two prompts.
     /// </summary>
-    public void DebugError(string message)
-    {
-        try { Emit(EventKinds.Debug, ConsoleColor.DarkGray, ConsoleColor.Black,
-            "Debug error: " + message); }
-        catch { }
-    }
+    public void DebugError(string message) => DebugNotice(message);
 
     public void RequestExit(int code)
     {

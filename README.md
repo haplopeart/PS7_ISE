@@ -130,9 +130,16 @@ framework.
 | `Ctrl+C` | copy the selection if there is one, otherwise stop the running command / abandon the line |
 | `Ctrl+V`, `Ctrl+A`, `Esc` | paste, jump to the start of the line, clear the current line |
 | `PgUp` / `PgDn` | scroll the scroll-back |
-| `F5` / `F8` | run the script pane / run the selected lines |
+| `F5` / `F8` | run the script pane / run the selected lines. While the debugger is holding a script, `F5` lets it go on |
 | `F1` | PowerShell 7 help |
 | `Ctrl+N` `Ctrl+O` `Ctrl+S` `Ctrl+Shift+S` `Ctrl+W` | new, open, save, save as, close the script tab |
+
+**Right click** in either pane is copy and paste on one button, the way a console has always done
+it: what is highlighted goes to the clipboard, and when nothing is highlighted the clipboard comes
+back the other way - into the line being typed in the console pane, into the script where the caret
+stands in the script pane. A right click never moves the caret and never empties the clipboard, and
+one with nothing highlighted while a command is running does nothing at all, because there is no
+prompt to paste into. `Shift+F10` and the context key are the same click.
 
 ## Commands pane
 
@@ -164,19 +171,66 @@ is the only way to get a command's parameters at all: the list itself is read wi
 importing anything, which is why four thousand commands arrive in about a second, and a
 command from a module nobody has loaded is a name with nothing else to say about itself.
 
+## Script debugger
+
+Breakpoints, stepping and variables, the way the original ISE had them.
+
+| Key | Effect |
+| --- | --- |
+| `F9` | put a breakpoint on the caret's line, or take it off. Clicking in the script pane's margin does the same |
+| `F5` | run the script; while stopped, let it go on (Debug > Continue) |
+| `F10` / `F11` | step over / step into |
+| `Shift+F11` | step out of the function execution is inside |
+| `Shift+F5` | stop the debugger: take the breakpoints off and hand the shell back |
+| `Ctrl+C` | while stopped, abandon the session it is stopped in |
+
+Debug > **Clear All Breakpoints** empties the margin without stopping; View > **Show Debugger
+Column** shows or hides the column, which appears by itself at the first stop either way.
+
+A breakpoint is a red dot in the margin, and the line execution has come to rest on is marked
+with an arrow beside it. The script pane follows the stop; the focus stays where it was, so a
+stop at the next breakpoint cannot type into the script while a command is half written.
+
+The Debugger column appears at the first stop and holds four things: where execution is, the
+call stack, the variables of whichever frame is selected, and an Immediate box that remembers
+what the expression box was asked and what came back. Click a frame and the variables are read
+again from that frame. Ask it a question and the answer is PowerShell's own sentence - an
+expression that does not parse is answered about the text that was typed, not about the script
+the answer is wrapped in.
+
+| Part | What it does |
+| --- | --- |
+| Status | The line execution is on, how many times its breakpoint has fired, and whether this stop came from a breakpoint or from stepping |
+| Call stack | The frames, outermost last, with the selected one marked. It is PowerShell's own stack, so a script run from this window shows the call that started it |
+| Variables | The frame's own variables with their type and value, and nothing else: not the session's automatics, not the names the read needed to make |
+| Immediate | The questions asked of the stopped frame and their answers, newest at the bottom |
+
+Two things follow from how PowerShell counts lines, and both are worth knowing before a
+breakpoint seems to be ignored:
+
+- A line breakpoint belongs to a **path**, so the script has to be saved before one can be set
+  on it. An unsaved tab is told so in the status bar. A script that is saved and unchanged since
+  it was saved is run *as that file* (`. 'C:\path\to\script.ps1'`), which is what lets its
+  breakpoints bind at all - and, as dot-sourcing always does, means the variables it leaves
+  behind belong to the session.
+- Breakpoints live in the shell, not in this window. Close the tab and the breakpoint stays set
+  until Debug > Stop Debugger or the next run takes it off.
+
 ## How it works
 
 ```
 PS7_ISE.exe  (Rust, native-windows-gui)
-    |  writes:  L <line>  T <caret> <text>  S  X   M i   M r   M d <name>
+    |  writes:  L <line>  T <caret> <text>  S  X   M i   M r   M d <name>   D <verb> <argument>
     |  reads:   E <kind> <fg> <bg> <text>   C <count> <text>   Q <code>
     |           M <kind> <part> <of> <reply> <payload>
+    |           D s <reason> <line> <col> <script>   D r   D <what> <part> <of> <reply> <text>
     v
 PowerShellEngineHost.exe  (.NET, Microsoft.PowerShell.SDK)
     Program.cs          the protocol
     ISEHost.cs          PSHost + PSHostRawUserInterface
     Session.cs          the runspace, the prompt loop, TabExpansion2
     CommandMetadata.cs  the command list, and one command's parameters
+    DebugService.cs     breakpoints, the stop, the frames, the variables
 ```
 
 `M` is the metadata verb: `i` for the list of commands, `d <name>` for one command, `r` to
@@ -201,12 +255,28 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 
 ## Debugging
 
-- `PS7ISE_DEBUG=1` traces engine events to `%TEMP%\ps7ise.log`, and makes the app replay
-  whatever is written to `%TEMP%\ps7ise-inject.txt` as keystrokes - the way automated tests
-  drive the prompt, since Windows refuses to deliver input posted by another process to a
-  window without the keyboard focus. `{MENU:n}` in that file runs the menu command with id
-  `n` (see `state::cmd`), which covers the entries that have no key of their own.
+- `PS7ISE_DEBUG=1` traces engine events, debugger requests, status-bar sentences and caret moves to
+  `%TEMP%\ps7ise.log`, and makes the app replay whatever is written to
+  `%TEMP%\ps7ise-inject.txt` as keystrokes - the way automated tests drive the prompt, since Windows
+  refuses to deliver input posted by another process to a window without the keyboard focus. A
+  window's own text is no more readable from another process than its keystrokes are, so the log is
+  the channel a test asserts on. Tokens the file can hold, besides plain text:
+
+  | Token | Effect |
+  | --- | --- |
+  | `{MENU:n}` | run the menu command with id `n` (see `state::cmd`) - the entries with no key of their own |
+  | `{LINE:n}` | put the caret on script line `n`, so `F9` and friends work on a line the test chose |
+  | `{F1}` `{F5}` `{F8}` `{F9}` `{F10}` `{F11}` | the function keys, through the same routing the keyboard uses |
+  | `{EVAL:text}` | ask the stopped frame an expression, as the Evaluate button does |
+  | `{DUMP}` | write what the Debugger column is holding into the log: the status sentence, the frames, the variables, the transcript row by row |
+  | `{ENTER}` `{ESC}` `{BS}` `{TAB}` `{UP}` `{DOWN}` `{LEFT}` `{RIGHT}` `{HOME}` `{END}` `{PGUP}` `{PGDN}` `{DEL}` `{CTRL_C}` `{CTRL_V}` | the keys a text field needs, named |
+
 - The engine's own stderr goes to `%TEMP%\ps7ise-engine.log`.
+- `harness\` holds the scripts that use all of this: `debug-protocol.ps1` talks to the engine
+  without a window, `test_debugger_ui.ps1` drives a real window through the debugger and keeps a
+  screenshot of every step, and `test_right_click.ps1` proves copy and paste in both panes. They
+  print `ok` / `FAIL` lines and a tally, and they photograph the window with `PrintWindow`, because
+  a rich edit control's text cannot be read back from outside.
 
 ## Repository layout
 
@@ -219,6 +289,10 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 | `src\commands.rs` | the `M` answers: reassembly, parsing, what the Commands pane knows |
 | `src\panel.rs` | the Commands column: its controls, its filters, Insert / Run / Copy |
 | `src\docs.rs` | script tabs, file I/O, "run this in the console" |
+| `src\debug.rs` | the `D` records: breakpoints, stop notifications, frames, variables |
+| `src\debug_pane.rs` | the Debugger column: its controls, following the stop, Evaluate |
+| `src\gutter.rs` | the script pane's margin: line numbers, breakpoint dots, the stop arrow, clicks |
+| `src\theme.rs` | the palette every control is drawn in, light and dark |
 | `src\highlight.rs` | PowerShell syntax colouring for the script pane |
 | `src\engine.rs` | the child process and its record protocol |
 | `PowerShellEngineHost\` | the .NET engine |
@@ -228,8 +302,13 @@ pipeline. A child process also means a runaway command cannot take the UI down w
 
 - Windows x64 only. The macOS and Linux ports are in development in parallel - see
   [Platform support](#platform-support).
-- No script debugger: no breakpoints, no stepping, no variable inspection. The Debug menu
-  holds only the three commands it can really perform - Run Script, Run Selection, Stop Run.
+- The debugger sets line breakpoints and nothing else: no condition, no hit count, no data
+  breakpoint on a variable, no run-to-cursor. The protocol can enable and disable a breakpoint it
+  has been given; no control asks it to yet.
+- Only this window's runspace is debugged. A background job or a remote session runs outside the
+  stop, so a breakpoint inside one is never reached.
+- A breakpoint is a line in a file: the script has to be saved to carry one, and editing the file
+  afterwards moves the dot off the statement it was set on.
 - Panes split at a fixed ratio and there is no draggable splitter bar; View > Show/Hide
   switches between one pane and two.
 - The command list font is fixed at two points larger than 1.0.9 for readability.

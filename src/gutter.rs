@@ -18,7 +18,7 @@ use crate::console::{
     EM_POSFROMCHAR,
 };
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Registered once, by [`create`]; the strip is the only window of this class.
 const CLASS_NAME: &str = "PS7ISEGutter";
@@ -30,8 +30,12 @@ const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETFONT: u32 = 0x003D;
 const WM_SETFONT: u32 = 0x0030;
 const WM_GETDLGCODE: u32 = 0x0087;
+const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_MOUSEWHEEL: u32 = 0x020A;
+const WM_SETCURSOR: u32 = 0x0020;
 const WM_PRINTCLIENT: u32 = 0x0318;
+/// `HTCLIENT`, the only part of this window a cursor question can be about.
+const HTCLIENT: isize = 1;
 
 const WS_CHILD: u32 = 0x4000_0000;
 const WS_VISIBLE: u32 = 0x1000_0000;
@@ -39,6 +43,11 @@ const SW_HIDE: i32 = 0;
 const SW_SHOW: i32 = 5;
 /// `MAKEINTRESOURCEW(IDI_APPLICATION)`, the arrow. A plain margin does not ask for a caret.
 const IDC_ARROW: *const u16 = 32512usize as *const u16;
+/// `MAKEINTRESOURCEW(IDI_HAND)`, the pointing hand: the margin asks for a breakpoint.
+const IDC_HAND: *const u16 = 32649usize as *const u16;
+/// `NULL_PEN`, so a mark is its colour and nothing else. A stroked circle would sit inside a
+/// black ring, which on a dark margin is a dark ring and on a light one a hard edge.
+const NULL_PEN: i32 = -3;
 
 const DT_RIGHT: u32 = 0x0002;
 const DT_VCENTER: u32 = 0x0004;
@@ -60,6 +69,25 @@ fn number_fg() -> u32 {
 
 fn separator() -> u32 {
     crate::console::colorref(crate::theme::palette().gutter_sep) as u32
+}
+
+/// The three marks a debugging session puts in the margin. They come from the palette because
+/// a dark red dot on a dark margin is a margin with a missing line number on it.
+fn breakpoint_fg(enabled: bool) -> u32 {
+    let palette = crate::theme::palette();
+    crate::console::colorref(if enabled {
+        palette.breakpoint
+    } else {
+        palette.breakpoint_off
+    }) as u32
+}
+
+fn stop_fg() -> u32 {
+    crate::console::colorref(crate::theme::palette().stop_fg) as u32
+}
+
+fn stop_bg() -> u32 {
+    crate::console::colorref(crate::theme::palette().stop_bg) as u32
 }
 
 /// Row height to fall back on when the pane holds a single row, so there is no second row
@@ -150,6 +178,20 @@ extern "system" {
     fn SetTextColor(hdc: *mut c_void, color: u32) -> u32;
     fn SetBkMode(hdc: *mut c_void, mode: i32) -> i32;
     fn DeleteObject(obj: *mut c_void) -> i32;
+    fn Ellipse(
+        hdc: *mut c_void,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    ) -> i32;
+    fn Polygon(hdc: *mut c_void, points: *const PointL, count: i32) -> i32;
+    fn GetStockObject(object: i32) -> *mut c_void;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn SetCursor(cursor: *mut c_void) -> *mut c_void;
 }
 
 #[link(name = "kernel32")]
@@ -165,6 +207,10 @@ fn wide(text: &str) -> Vec<u16> {
 // ------------------------------------------------------------------ the window
 
 static REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Bumped whenever the debugger changes what the margin shows, so [`refresh`] notices a change
+/// that has nothing to do with scrolling.
+static MARKS: AtomicU64 = AtomicU64::new(0);
 
 /// Registers the gutter class the first time it is asked for. The class has no background
 /// brush because [`paint`] covers the whole client area itself.
@@ -302,6 +348,36 @@ unsafe fn message(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> 
         },
         // The strip takes no keyboard input; the script pane is the only thing that does.
         WM_GETDLGCODE => 0,
+
+        // A click in the margin sets or clears the breakpoint on that line, which is what the
+        // margin is for in every editor that has one. The coordinates are inside the strip, and
+        // the strip is as tall as the pane, so one row of the strip is one row of the script.
+        WM_LBUTTONDOWN => {
+            let y = ((lparam as i32) >> 16) as i16 as i32;
+            if let Some(editor) = editor() {
+                if let Some(line) = line_at_y(hwnd, editor, y) {
+                    crate::state::toggle_breakpoint(line);
+                }
+            }
+            0
+        }
+
+        // The whole strip answers to a click, so the whole strip asks for the pointing hand. A
+        // cursor that changed only over the eight pixels of an existing dot would tell the user
+        // where the breakpoints are but not that the margin takes clicks in the first place.
+        WM_SETCURSOR => {
+            // Only for the client area: Windows also asks this when the cursor is over a border
+            // of the window this strip belongs to, and answering there would put a hand on the
+            // resize edge.
+            let hit = (lparam as i32 & 0xFFFF) as u16 as isize;
+            let hand = LoadCursorW(std::ptr::null_mut(), IDC_HAND);
+            if hit == HTCLIENT && !hand.is_null() {
+                SetCursor(hand);
+                return 1;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -412,6 +488,13 @@ unsafe fn paint(hdc: *mut c_void, strip: *mut c_void) {
             return;
         }
     };
+
+    // What the margin is showing beside the numbers: every breakpoint this script carries, and
+    // the line execution is held on. Both are asked for once per repaint rather than once per
+    // row, because a repaint covers forty rows and the answers do not change while it runs.
+    let marks = crate::state::script_breakpoints();
+    let stop = crate::state::stop_line();
+
     let mut shown = -1i32;
     let mut row = 0i32;
     while y < rc.bottom {
@@ -420,8 +503,33 @@ unsafe fn paint(hdc: *mut c_void, strip: *mut c_void) {
             None => break,
         };
         // A wrapped line carries its number on its first row only; the rows it runs into
-        // are left empty, which is what makes them read as the same line.
+        // are left empty, which is what makes them read as the same line. The marks go on
+        // that same first row, so a line wrapped over three rows has one dot, not three.
         if line != shown {
+            // The row of the line execution is held on is banded before anything is drawn on
+            // it, so the margin reads as one highlighted line rather than as a number that
+            // happens to be a different colour.
+            if Some(line) == stop {
+                let band = Rect {
+                    left: 0,
+                    top: y,
+                    right: rc.right - 1,
+                    bottom: y + row_h,
+                };
+                fill(hdc, &band, stop_bg());
+            }
+            let armed = marks.iter().find(|mark| mark.0 == line).map(|mark| mark.1);
+            if let Some(armed) = armed {
+                dot(hdc, y, row_h, armed);
+            }
+            if Some(line) == stop {
+                // The line execution stopped on is very often the line the breakpoint is on, and
+                // the two marks live in the same column. The arrow goes beside the dot rather
+                // than over it, because a stop that hides its own breakpoint tells the user the
+                // breakpoint is gone at the exact moment they most want to see it.
+                arrow(hdc, y, row_h, if armed.is_some() { 11 } else { 2 });
+            }
+
             let mut box_rc = Rect {
                 left: 0,
                 top: y,
@@ -433,6 +541,9 @@ unsafe fn paint(hdc: *mut c_void, strip: *mut c_void) {
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect();
+            // The line execution is stopped on is the one number in the margin the user is
+            // looking for, so it is not drawn in margin grey.
+            SetTextColor(hdc, if Some(line) == stop { stop_fg() } else { number_fg() });
             DrawTextW(
                 hdc,
                 text.as_ptr(),
@@ -454,6 +565,87 @@ unsafe fn paint(hdc: *mut c_void, strip: *mut c_void) {
     }
 }
 
+/// The dot of a line breakpoint, in the column at the left of the numbers. A disabled
+/// breakpoint gets the same dot in a colour the eye reads as off: an empty margin would say
+/// there is nothing there, and there is something there that has merely been switched off.
+unsafe fn dot(hdc: *mut c_void, top: i32, row_h: i32, enabled: bool) {
+    let diameter = 7.min(row_h.max(4) - 1);
+    let left = 3;
+    let above = top + (row_h - diameter) / 2;
+    let brush = CreateSolidBrush(breakpoint_fg(enabled));
+    let pen = GetStockObject(NULL_PEN);
+    let old_brush = SelectObject(hdc, brush);
+    let old_pen = SelectObject(hdc, pen);
+    Ellipse(hdc, left, above, left + diameter, above + diameter);
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    if !brush.is_null() {
+        DeleteObject(brush);
+    }
+}
+
+/// The arrow on the line execution is held on. It points at the text rather than sitting in
+/// front of it, which is the difference between a mark and a character the user has to delete.
+///
+/// `left` is where it starts: the margin's mark column, except on the line that carries a
+/// breakpoint too, where the dot is drawn first and the arrow has to stand beside it.
+unsafe fn arrow(hdc: *mut c_void, top: i32, row_h: i32, left: i32) {
+    let high = 7.min(row_h.max(5));
+    let middle = top + row_h / 2;
+    let points = [
+        PointL { x: left, y: middle - high / 2 },
+        PointL { x: left, y: middle + high / 2 },
+        PointL {
+            x: left + high,
+            y: middle,
+        },
+    ];
+    let brush = CreateSolidBrush(stop_fg());
+    let pen = GetStockObject(NULL_PEN);
+    let old_brush = SelectObject(hdc, brush);
+    let old_pen = SelectObject(hdc, pen);
+    Polygon(hdc, points.as_ptr(), points.len() as i32);
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    if !brush.is_null() {
+        DeleteObject(brush);
+    }
+}
+
+/// The document line whose first row is under `y`, a point inside the strip. The walk is the
+/// one [`paint`] makes, because a click has to land on the line the number beside it names —
+/// and the two can only agree by being measured the same way.
+unsafe fn line_at_y(strip: *mut c_void, editor: *mut c_void, y: i32) -> Option<i32> {
+    let (_, high) = crate::console::client_size(strip);
+    if y < 0 || y >= high {
+        return None;
+    }
+
+    // The same offset from the pane's window to its text that `paint` has to allow for, or the
+    // first row of the script would answer to clicks above the margin.
+    let mut wr = Rect::default();
+    GetWindowRect(editor, &mut wr);
+    let mut origin = PointL { x: 0, y: 0 };
+    ClientToScreen(editor, &mut origin);
+    let border = (origin.y - wr.top).max(0);
+
+    let mut row_h = 0i32;
+    let first = (send_message(editor, EM_GETFIRSTVISIBLELINE, 0, 0) as i32).max(0);
+    let top = row_top(editor, first, &mut row_h)? + border;
+    if y < top || row_h <= 0 {
+        // Above the first row of text there is margin and nothing else.
+        return None;
+    }
+
+        // The document line the click is on. `line_at` maps a row to the line that row's first
+        // character belongs to, which already covers the rows a wrapped line ran into.
+        let mut row = (y - top) / row_h;
+        if row > line_count(editor) {
+            row = line_count(editor) - 1;
+        }
+        line_at(editor, first + row.max(0))
+    }
+
 fn fill(hdc: *mut c_void, rect: &Rect, color: u32) {
     unsafe {
         let brush = CreateSolidBrush(color);
@@ -467,14 +659,17 @@ fn fill(hdc: *mut c_void, rect: &Rect, color: u32) {
 // ------------------------------------------------------------------ repainting
 
 /// What the strip has to be repainted for: the top row of the pane, how many rows it holds,
-/// and how tall the strip itself got. `refresh` compares this with the last one it saw, so
-/// the update timer does not invalidate the gutter twenty five times a second.
-fn visible_key(strip: *mut c_void, editor: *mut c_void) -> (i32, i32, i32) {
+/// how tall the strip itself got, and how many times the debugger has changed what the margin
+/// shows. `refresh` compares this with the last one it saw, so the update timer does not
+/// invalidate the gutter twenty five times a second — and so that a breakpoint set or a stop
+/// reached repaints it once, without the timer having to notice the difference on its own.
+fn visible_key(strip: *mut c_void, editor: *mut c_void) -> (i32, i32, i32, u64) {
     let (_, height) = crate::console::client_size(strip);
     (
         send_message(editor, EM_GETFIRSTVISIBLELINE, 0, 0) as i32,
         line_count(editor),
         height,
+        MARKS.load(Ordering::SeqCst),
     )
 }
 
@@ -484,6 +679,16 @@ pub fn refresh(strip: *mut c_void, editor: *mut c_void) {
     let key = visible_key(strip, editor);
     if crate::state::gutter_changed(key) {
         // The strip paints all of itself, so Windows is not asked to erase it first.
+        unsafe { crate::state::InvalidateRect(strip, std::ptr::null(), 0) };
+    }
+}
+
+/// Asks for the margin to be drawn again, because what it draws has changed underneath it: a
+/// breakpoint was added or taken away, or execution came to rest on a line. The scroll position
+/// has not moved, so nothing else would notice.
+pub fn invalidate() {
+    MARKS.fetch_add(1, Ordering::SeqCst);
+    if let Some(strip) = crate::state::read(|s| s.line_gutter).flatten() {
         unsafe { crate::state::InvalidateRect(strip, std::ptr::null(), 0) };
     }
 }

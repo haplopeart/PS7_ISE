@@ -78,6 +78,17 @@ pub mod cmd {
     /// Relaunch the program with Administrator privileges, like the shield icon on the
     /// original ISE's Run button.
     pub const RUN_AS_ADMIN: u32 = 42;
+
+    // The debugger. F5 is not in this list: it belongs to Run Script and is routed by whether
+    // the shell is held at a stop, which is what the original's single Run/Continue button did.
+    pub const TOGGLE_BREAKPOINT: u32 = 50;
+    pub const CONTINUE: u32 = 51;
+    pub const STEP_INTO: u32 = 52;
+    pub const STEP_OVER: u32 = 53;
+    pub const STEP_OUT: u32 = 54;
+    pub const STOP_DEBUGGING: u32 = 55;
+    pub const CLEAR_BREAKPOINTS: u32 = 56;
+    pub const TOGGLE_DEBUGGER: u32 = 57;
 }
 
 /// Everything the UI needs at run time.
@@ -108,7 +119,7 @@ pub struct AppState {
     pub caret_text: String,
     /// Top row, line count and strip height the line numbers were painted for, so the
     /// update timer only invalidates the strip when one of them moved.
-    pub gutter_key: (i32, i32, i32),
+    pub gutter_key: (i32, i32, i32, u64),
 
     /// Kept alive: destroying a menu or button a handler still refers to would crash
     /// the message loop. They are never read after construction, which is the point.
@@ -139,6 +150,16 @@ pub struct AppState {
     pub show_commands: bool,
     /// What the Commands column knows, and the controls that show it.
     pub commands: crate::panel::Commands,
+
+    /// The Debugger column, under the Commands one: the frames a stopped script is held
+    /// between, what those frames hold, and an Immediate box. See [`crate::debug_pane`].
+    pub debugger: crate::debug_pane::Debugger,
+    /// Hidden until there is something to debug. Unlike the Commands column, this one has
+    /// nothing to show while the shell is running normally, and a stop opens it by itself —
+    /// which is when it gets asked for.
+    pub show_debugger: bool,
+    /// What the shell has said about breakpoints and about the stop, if there is one.
+    pub debug: crate::debug::Model,
     /// Held so the font outlives the controls it was given to; nothing reads it back.
     #[allow(dead_code)]
     pub panel_font: Option<nwg::Font>,
@@ -257,6 +278,12 @@ pub fn console_reset() {
 
 pub fn set_status(text: &str) {
     read(|s| s.status.set_text(0, text));
+    if debug_enabled() {
+        // The bar is the third place a message goes, and the one a test cannot read: a status
+        // control's panels answer `GetWindowText` with nothing. Written here so the sentence the
+        // user is shown is in the same log as the request that caused it.
+        log_line(&format!("status: {}", text));
+    }
 }
 
 /// Writes the caret readout, the status bar's second panel. `set_status` owns the first
@@ -278,10 +305,17 @@ pub fn debug_enabled() -> bool {
     std::env::var_os("PS7ISE_DEBUG").is_some()
 }
 
-/// Appends a line to `%TEMP%\ps7ise.log`. This is a GUI build with no console attached,
-/// so a file is the only place start-up problems can be reported.
+/// Appends a line to `%TEMP%\ps7ise.log`, and does nothing at all unless `PS7ISE_DEBUG` is set.
+/// This is a GUI build with no console attached, so a file is the only place start-up problems and
+/// the debugger's own traffic can be reported.
+///
+/// The switch is tested here rather than at each call: the trace is written from a dozen places,
+/// and one that forgot to ask would have a release build write to a temporary file on every keystroke.
 pub fn log_line(text: &str) {
     use std::io::Write;
+    if !debug_enabled() {
+        return;
+    }
     let path = std::env::temp_dir().join("ps7ise.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -340,8 +374,9 @@ pub fn update_caret_display() -> Option<String> {
 
 /// True when the script pane has scrolled or changed length since the last call, which is
 /// when the line-number strip has to be repainted. The gutter stores nothing, so this is
-/// the only state that has to be remembered.
-pub fn gutter_changed(key: (i32, i32, i32)) -> bool {
+/// the only state that has to be remembered — except the debugger's own generation, which
+/// changes when neither the pane nor the strip has moved.
+pub fn gutter_changed(key: (i32, i32, i32, u64)) -> bool {
     let changed = read(|s| s.gutter_key != key).unwrap_or(true);
     if changed {
         write(|s| s.gutter_key = key);
@@ -366,6 +401,82 @@ pub fn is(
     read(|s| pick(s) == *handle).unwrap_or(false)
 }
 
+/// Puts the caret at the start of a line of the script pane and takes the focus to it, counted
+/// the way [`caret_line`] counts them.
+///
+/// The debug harness calls this through `{LINE:n}`. It exists because the window cannot be
+/// driven by posted keystrokes — Windows refuses input to a window that does not own the
+/// keyboard — and half of what is worth testing here (F9 on a line, stepping, a breakpoint in
+/// the margin) starts from the caret being somewhere particular.
+pub fn caret_to_line(line: i32) {
+    move_caret(line, true);
+}
+
+/// Puts the caret on a line and scrolls it into view *without* taking the focus.
+///
+/// This is what the debugger does when execution comes to rest: the line it stopped on may be
+/// forty rows below what the pane is showing, and an arrow the user cannot see is a stop they
+/// cannot see. The focus stays where it was, because the expression box is where the text the
+/// user is typing lives, and a stop at the next breakpoint while a question is half written
+/// would put those characters into the script.
+pub fn reveal_line(line: i32) {
+    move_caret(line, false);
+}
+
+fn move_caret(line: i32, focus: bool) {
+    let offset = read(|s| {
+        // The control ends its lines with \r; the count below works in \n.
+        let text = crate::console::normalize_breaks(&s.editor.text());
+        let mut offset = 0usize;
+        let mut found = 0i32;
+        for name in text.split_inclusive('\n') {
+            if found == line - 1 {
+                return Some(offset);
+            }
+            // The control counts UTF-16 code units, and a line break costs one whether the
+            // text spells it \n or \r\n.
+            offset += name.encode_utf16().count();
+            found += 1;
+        }
+        // Past the last line: the end of the text, which is where the caret goes rather than
+        // nowhere, because a test that asks for line 40 of a five line script should still see
+        // the caret move.
+        Some(text.encode_utf16().count())
+    })
+    .flatten();
+
+    let Some(offset) = offset else {
+        if debug_enabled() {
+            // No text to count: the editor is empty, or there is no document. A caret that does
+            // not move looks from outside like a token that was never received, and this says
+            // which of the two it was.
+            log_line(&format!("caret: line {} refused, the script pane holds nothing", line));
+        }
+        return;
+    };
+    if debug_enabled() {
+        log_line(&format!("caret: line {} at offset {}", line, offset));
+    }
+    write(|s| {
+        if focus {
+            s.editor.focus();
+        }
+        s.editor.set_selection(offset as u32..offset as u32);
+        // EM_SCROLLCARET: `set_selection` moves the caret but does not promise to scroll to it,
+        // so a caret placed off screen stays off screen. The debugger is the caller that cares —
+        // it stops wherever the script happens to be.
+        if let Some(hwnd) = s.editor.handle.hwnd() {
+            crate::console::send_message(
+                hwnd as *mut std::ffi::c_void,
+                crate::console::EM_SCROLLCARET,
+                0,
+                0,
+            );
+        }
+    });
+    update_caret_display();
+}
+
 /// The command a menu item or toolbar button stands for.
 pub fn command_for(handle: &nwg::ControlHandle) -> Option<cmd::Id> {
     read(|s| {
@@ -388,22 +499,47 @@ fn set_title(text: &str) {
 
 // ------------------------------------------------------------------ engine pump
 
-/// While `PS7ISE_DEBUG=1` is set, whatever is appended to `%TEMP%\ps7ise-inject.txt` is
-/// replayed into the console pane as if it had been typed, and the file is emptied. Windows
-/// refuses to deliver keystrokes that another process posts to a window without the
-/// keyboard focus, so this is the only way an automated test can drive the prompt.
+/// While `PS7ISE_DEBUG=1` is set, whatever is written to `%TEMP%\ps7ise-inject.txt` is replayed
+/// into the console pane as if it had been typed, and the file is taken away. Windows refuses to
+/// deliver keystrokes that another process posts to a window without the keyboard focus, so this is
+/// the only way an automated test can drive the prompt.
 fn drain_input_file() {
     if !debug_enabled() {
         return;
     }
     let path = std::env::temp_dir().join("ps7ise-inject.txt");
-    let Ok(script) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    if script.is_empty() {
+    // An empty file is skipped rather than taken. A writer that has just created the file holds it
+    // open with nothing in it yet, and taking it away from under that writer means the bytes it
+    // then writes go into a file this pump has already deleted - which is a keystroke that vanishes
+    // without trace, the single worst thing a test harness can do to itself.
+    if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) == 0 {
         return;
     }
-    let _ = std::fs::write(&path, "");
+    // The script is *renamed* rather than read and then emptied. Reading first leaves a window
+    // between the read and the truncate: a test that writes its next key inside that window has it
+    // wiped by the truncate, and a lost keystroke is the worst kind of test failure, because the
+    // program looks like it ignored a key rather than like it never saw one. A rename hands the
+    // bytes over in one step — after it the file is either fully this pump's or fully still there.
+    let taken = path.with_extension("taken");
+    if std::fs::rename(&path, &taken).is_err() {
+        // Nothing to read, or a writer still holding it open; the next tick will find it.
+        return;
+    }
+    let script = std::fs::read_to_string(&taken).unwrap_or_default();
+    if script.is_empty() {
+        // Belt and braces: whatever it was that left the file empty, give it back rather than
+        // throw it away, unless the writer has already made a new one.
+        if path.exists() {
+            let _ = std::fs::remove_file(&taken);
+        } else {
+            let _ = std::fs::rename(&taken, &path);
+        }
+        return;
+    }
+    let _ = std::fs::remove_file(&taken);
+    // What was replayed, written first: when a test complains that a key did nothing, the question
+    // is whether the window ignored it or never received it, and the log answers it.
+    log_line(&format!("inject: {}", script.replace('\n', " ")));
     crate::input::inject(&script);
 }
 
@@ -442,6 +578,11 @@ pub fn pump_engine() {
     // The Commands column reads its answers here too: they arrive on the engine's reader
     // thread, and a list of four thousand names cannot be applied to a window from there.
     crate::panel::pump();
+
+    // The same for the debugger: a stop is an event that has to be seen even when the shell has
+    // moved on by the time the window next looks, and the answers about it arrive in pieces
+    // between the console's own output.
+    crate::debug_pane::pump();
 
     let ended = read(|s| s.engine.as_ref().map(|e| e.is_ended()).unwrap_or(false))
         .unwrap_or(false);
@@ -654,4 +795,117 @@ fn char_byte_len(text: &str, chars: usize) -> usize {
         }
     }
     bytes
+}
+
+// ------------------------------------------------------------------ asking the debugger
+
+/// Asks the shell one debugger question, and waits for nothing: an answer arrives in pieces
+/// over the following ticks, so the most the caller can be told is that the question was put.
+pub fn debug_request(verb: &str, argument: &str) {
+    if debug_enabled() {
+        log_line(&format!("debug: {} {}", verb, argument));
+    }
+    write(|s| {
+        if let Some(engine) = s.engine.as_mut() {
+            engine.debug_request(verb, argument);
+        }
+    });
+}
+
+/// Asks the shell to go on: continue, step into, step over, step out, or give up on the script.
+/// Nothing is cleared here, because the engine is the one that says a stop has ended, and a
+/// window that guessed when it ended would be showing a frame it invented.
+pub fn debug_resume(verb: &str) {
+    debug_request(verb, "");
+}
+
+/// Puts a breakpoint on a line of the script being edited, or takes the one that is there off.
+/// This is what F9 means, and what a click in the gutter means.
+pub fn toggle_breakpoint(line: i32) {
+    let Some(path) = current_script_path() else {
+        // The one case this cannot work, said plainly: the shell keeps a line breakpoint
+        // against a file on disk, so a tab that has never been saved has nowhere to put one.
+        set_status("Save the script before setting a breakpoint: a breakpoint belongs to a file.");
+        beep();
+        return;
+    };
+
+    match read(|s| s.debug.breakpoint_at(&path, line).map(|point| point.id)).flatten() {
+        Some(id) => debug_request("b", &format!("-{}", id)),
+        None => debug_request("b", &format!("+{} {}", line, path)),
+    }
+}
+
+/// Takes every breakpoint off — in this script and in every other one the shell still carries,
+/// because that is what the shell's own "remove all" means.
+pub fn clear_breakpoints() {
+    debug_request("b", "c");
+}
+
+/// Asks for the breakpoint list. Sent once the shell is up, and after anything that can change
+/// it, because the gutter is drawn from the answer rather than from what the window asked for.
+pub fn list_breakpoints() {
+    debug_request("l", "");
+}
+
+/// The breakpoints this script carries, as line and armed state, in one call: the gutter draws
+/// every visible row and would otherwise ask the question, and resolve the script's path, once
+/// per row per repaint.
+pub fn script_breakpoints() -> Vec<(i32, bool)> {
+    let Some(path) = current_script_path() else {
+        return Vec::new();
+    };
+    read(|s| {
+        s.debug
+            .breakpoints
+            .iter()
+            .filter(|point| point.script.eq_ignore_ascii_case(&path))
+            .map(|point| (point.line, point.enabled))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The line execution is held on, if it is held on a line of the script being edited. A stop in
+/// some other file has no mark to draw in this gutter, and putting one on the same line number
+/// of an unrelated script would send the user to the wrong place.
+pub fn stop_line() -> Option<i32> {
+    let path = current_script_path()?;
+    let stop = read(|s| s.debug.stop.clone())??;
+    if stop.script.is_empty() || !stop.script.eq_ignore_ascii_case(&path) {
+        return None;
+    }
+    Some(stop.line)
+}
+
+// ------------------------------------------------------------------ the debugger
+
+/// The line the caret is on, counted the way the gutter counts them, so a breakpoint asked for
+/// from the keyboard lands on the line the user is looking at.
+pub fn caret_line() -> i32 {
+    caret_position().0
+}
+
+/// The script the pane is showing, in the form a breakpoint is attached to: a full path with no
+/// `\\?\` on the front of it, that prefix being how Windows spells "do not shorten this" where
+/// PowerShell reports a script name without it.
+///
+/// Gives back nothing for a tab that has never been saved. A PowerShell line breakpoint belongs
+/// to a file rather than to a buffer, so an unsaved script has nowhere to put one - and a
+/// window that drew a mark for a breakpoint the shell turned down would be a window whose
+/// gutter cannot be believed.
+pub fn current_script_path() -> Option<String> {
+    let path = read(|s| s.docs.get(s.current)?.path.clone())??;
+    let full = std::path::absolute(&path).ok()?;
+    let text = full.to_string_lossy().to_string();
+    Some(text.strip_prefix(r"\\?\").unwrap_or(&text).to_string())
+}
+
+/// True while execution is held at a stop. This is the engine's own answer rather than a guess
+/// made here from the last command the window sent: the shell can stop and resume faster than
+/// the window is painted, and a menu keyed to what the window *asked* for would be greyed out
+/// wrongly, at the one moment the user needs it.
+pub fn debug_stopped() -> bool {
+    read(|s| s.engine.as_ref().map(|engine| engine.is_stopped()).unwrap_or(false))
+        .unwrap_or(false)
 }

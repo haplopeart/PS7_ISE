@@ -6,6 +6,10 @@ use crate::state::{console_write, read, set_status, write, Doc, DIM_FG};
 const EDITOR_FONT: &str = "Consolas";
 const EDITOR_HEIGHT: i32 = 220; // twips: 11pt
 
+/// The shortest tab container native-windows-gui will bind a page to. See [`sync_tabs`], where
+/// the container is made this tall for the moment a page is attached to it.
+const PAGE_MIN_H: u32 = 64;
+
 /// Applies the editor font and paints the syntax colours of the current text.
 pub fn repaint_editor() {
     write(|s| {
@@ -262,6 +266,20 @@ pub fn sync_tabs() {
             s.pages.truncate(titles.len());
             s.tab_titles.truncate(titles.len());
         }
+
+        // Binding a page asks native-windows-gui to size it from the container, and the
+        // arithmetic it uses is `container height - header strip`. This container is only as
+        // tall as its headers - `layout` makes the panes cover the rest of the window rather
+        // than parenting them into the page - so the subtraction runs out of digits: in a
+        // release build the answer wraps to a size nobody ever looks at, and in a debug one it
+        // is checked and panics, which is a window that never opens. So the container is given
+        // a height that can hold a page for as long as it takes to bind one, and put back
+        // afterwards; `layout` is about to give it its real size anyway.
+        let (strip_w, strip_h) = s.tabs.size();
+        let grew = titles.len() > s.pages.len() && strip_h < PAGE_MIN_H;
+        if grew {
+            s.tabs.set_size(strip_w, PAGE_MIN_H);
+        }
         // A header that is already there is renamed in place; only genuinely new
         // documents get a new tab.
         for index in 0..titles.len().min(s.pages.len()) {
@@ -297,6 +315,9 @@ pub fn sync_tabs() {
         }
         if current < s.pages.len() {
             s.tabs.set_selected_tab(current);
+        }
+        if grew {
+            s.tabs.set_size(strip_w, strip_h);
         }
         s.switching_tab = false;
     });
@@ -399,6 +420,17 @@ pub fn run_text(text: &str) {
     }
 
     // Echo first, outside the state borrow: the console writes through the same state.
+    if crate::state::debug_enabled() {
+        // The length plus the start of it, which is how a run that did not stop on a breakpoint
+        // was traced to the wrong branch of run_script: the console pane shows the echo, but the
+        // log is what a test can read.
+        let head: String = text.chars().take(70).collect();
+        crate::state::log_line(&format!(
+            "run_text: {} chars: {:?}",
+            text.chars().count(),
+            head.replace("\r\n", "\\n").replace('\n', "\\n")
+        ));
+    }
     console_write(&format!("{}\n", text.trim_end()), DIM_FG);
     write(|s| {
         if let Some(engine) = s.engine.as_mut() {
@@ -411,7 +443,62 @@ pub fn run_text(text: &str) {
 }
 
 pub fn run_script() {
-    run_text(&editor_text());
+    // A script that is on disk and unchanged since it was saved runs *as that file*. This is
+    // not a shortcut: PowerShell attaches a line breakpoint to a path, so a script whose text is
+    // handed to the prompt cannot be debugged no matter what breakpoints it carries - the shell
+    // is running a block of text with no file behind it, and the marks in the margin would be
+    // decoration. Running the file gives the shell the name the breakpoints were set against.
+    let on_disk = read(|s| {
+        let doc = s.docs.get(s.current)?;
+        let path = doc.path.as_ref()?;
+        // Both sides are put through `normalize_breaks` first, because they do not agree on
+        // their own: the document record holds the file's text as it was read - CRLF on anything
+        // written under Windows - while the editor is loaded with line ends normalized to `\n`
+        // (see `load_editor_from_doc`) and RichEdit gives them back that way. Compared as they
+        // are, a script opened from disk and never touched differs from its own file by every
+        // line break in it, which sent Run Script down the "unsaved text" branch for every file
+        // on the machine: the shell ran a block of text with no path, so no breakpoint could
+        // bind to it and the dots in the margin were decoration.
+        if crate::console::normalize_breaks(&doc.text).trim_end()
+            != crate::console::normalize_breaks(&editor_text()).trim_end()
+        {
+            return None;
+        }
+        Some(path.clone())
+    })
+    .flatten();
+
+    if crate::state::debug_enabled() {
+        // Which of the two branches ran is the difference between a breakpoint being hit and a
+        // script that runs straight through with dots in the margin, and the two look identical
+        // from the console. A text that is one character different from the file - a trailing
+        // space the editor added, a tab a save removed - silently takes the second branch.
+        crate::state::log_line(&format!(
+            "run_script: {}",
+            match &on_disk {
+                Some(path) => format!("running the file {}", path.display()),
+                None => format!(
+                    "running the editor's text, {} chars",
+                    editor_text().chars().count()
+                ),
+            }
+        ));
+    }
+
+    match on_disk {
+        // Dot-sourced rather than called, so that a script which sets a variable leaves it in
+        // the console pane afterwards the way it does in the original ISE, and so that a script
+        // that reads `$PSScriptRoot` still finds it.
+        Some(path) => run_text(&format!(". {}", single_quoted(&path.to_string_lossy()))),
+        None => run_text(&editor_text()),
+    }
+}
+
+/// `text` as a PowerShell single-quoted string. A single quote is quoted by doubling it, which
+/// is the only escaping that form has — and a script under `C:\Users\O'Brien\` is not rare
+/// enough to be the one case that stops the Run button working.
+fn single_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 pub fn run_selection() {

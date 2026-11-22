@@ -17,13 +17,16 @@ RequestExecutionLevel admin
   !define PAYLOAD "dist"
 !endif
 
-; Version that the front-end already carries in Cargo.toml (and in the exe's version
-; resource through build.rs). Added to Add/Remove Programs so a user or tool can see
-; which build is installed without opening the exe's Properties sheet. The number must
-; stay in sync with the front end; a mismatch here is cosmetic only and never breaks
-; install or uninstall.
+; Version to report in Add/Remove Programs and in the installer's own version resource, so a user
+; or a tool can see which build is installed without opening the exe's Properties sheet.
+;
+; The front end's number is the one in Cargo.toml, and `build.ps1` raises its third digit on every
+; rebuild, so the two are kept in step by handing the current one to makensis:
+; `makensis /DVERSION=1.5.1 /DPAYLOAD=dist-setup PS7ISE-Installer.nsi`. The value written here is
+; the fallback for a plain `makensis PS7ISE-Installer.nsi`, and is only ever cosmetic - a stale one
+; changes what Add/Remove Programs says, never what gets installed.
 !ifndef VERSION
-  !define VERSION "1.4.1"
+  !define VERSION "1.5.1"
 !endif
 
 ; The installer's own version resource, so Explorer's Properties sheet on PS7ISE-Setup.exe says

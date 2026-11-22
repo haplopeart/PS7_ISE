@@ -26,6 +26,15 @@ pub const EM_LINEINDEX: u32 = 0x00BB;
 pub const EM_LINEFROMCHAR: u32 = 0x00C9;
 /// First visible row of the control. Counts display rows, so it knows about wrapping.
 pub const EM_GETFIRSTVISIBLELINE: u32 = 0x00CE;
+/// Scrolls the control until the caret's row is visible. Setting a selection moves the caret but
+/// makes no promise about showing it, which is the difference between following a debugger stop
+/// and appearing to: the line execution stopped on is usually a screen away from where the pane
+/// was left.
+///
+/// `0x00B7`, from `winuser.h`. The edit control's messages are plain numbers and only its
+/// `EM_EX…` family is `WM_USER` based, which is easy to get wrong in a file that holds both, and a
+/// wrong one here is not an error but a scroll that silently does not happen.
+pub const EM_SCROLLCARET: u32 = 0x00B7;
 /// Pixel position of a character, in the control's client area.
 pub const EM_POSFROMCHAR: u32 = WM_USER + 38;
 /// Paragraph a character belongs to: the number the user counts as "line 1, line 2...".
@@ -92,7 +101,9 @@ pub fn send_message(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -
 pub const WM_CUT: u32 = 0x0300;
 pub const WM_COPY: u32 = 0x0301;
 pub const WM_PASTE: u32 = 0x0302;
-pub const WM_RBUTTONDOWN: u32 = 0x0204;
+/// The message a right click produces after the button comes up, and the one Shift+F10 and the
+/// context key produce too. Reacting here rather than to the button itself is what lets one
+/// handler answer all three.
 pub const WM_CONTEXTMENU: u32 = 0x007B;
 
 /// Size of a window's client area, in pixels.
